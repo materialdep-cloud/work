@@ -1,0 +1,2039 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>互動式派工管理看板</title>
+    <!-- Tailwind CSS CDN -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Lucide Icons -->
+    <script src="https://unpkg.com/lucide@latest"></script>
+    <!-- HTML2Canvas CDN (用於將網頁元素轉換為高畫質圖檔) -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
+    <style>
+        /* 調整捲軸樣式 */
+        ::-webkit-scrollbar {
+            width: 8px;
+            height: 8px;
+        }
+        ::-webkit-scrollbar-track {
+            background: #f1f5f9;
+        }
+        ::-webkit-scrollbar-thumb {
+            background: #cbd5e1;
+            border-radius: 6px;
+        }
+        ::-webkit-scrollbar-thumb:hover {
+            background: #94a3b8;
+        }
+        /* 拖曳時的視覺效果 */
+        .dragging {
+            opacity: 0.5;
+            transform: scale(1.02);
+            box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.1);
+        }
+        .drag-over {
+            background-color: #f1f5f9;
+            border: 2px dashed #3b82f6 !important;
+        }
+        /* 唯讀模式下的專屬隱藏樣式 */
+        .viewer-active .manager-only {
+            display: none !important;
+        }
+        
+        /* 💡 修正 Z-index 衝突：確認視窗層級必須最高 */
+        #detail-modal { z-index: 50; }
+        #confirm-modal { z-index: 100 !important; }
+    </style>
+</head>
+<body class="bg-slate-50 min-h-screen text-slate-800 font-sans">
+
+    <!-- 頂部導覽列 -->
+    <header class="bg-white border-b border-slate-200 sticky top-0 z-10 px-6 py-4 shadow-sm">
+        <div class="max-w-[1800px] mx-auto flex flex-col sm:flex-row justify-between items-center gap-4">
+            <div class="flex items-center gap-3">
+                <div class="p-2.5 bg-blue-600 text-white rounded-xl shadow-md shadow-blue-100">
+                    <i data-lucide="layout-dashboard" class="w-7 h-7"></i>
+                </div>
+                <div>
+                    <h1 class="text-2xl font-black text-slate-900 tracking-wide" id="main-title">資材派工系統</h1>
+                </div>
+            </div>
+            
+            <!-- 管理按鈕 (唯讀模式下會被隱藏) -->
+            <div class="flex items-center gap-3 w-full sm:w-auto justify-end manager-only">
+                <button onclick="triggerResetDefault()" class="flex items-center gap-2 px-5 py-2.5 border border-slate-200 text-slate-700 hover:text-red-600 hover:border-red-200 rounded-xl text-base font-bold transition bg-white shadow-sm">
+                    <i data-lucide="rotate-ccw" class="w-5 h-5"></i>
+                    重置預設資料
+                </button>
+                <button onclick="triggerClearAllDispatches()" class="flex items-center gap-2 px-5 py-2.5 bg-slate-800 hover:bg-slate-950 text-white rounded-xl text-base font-bold transition shadow-sm">
+                    <i data-lucide="trash-2" class="w-5 h-5"></i>
+                    清除所有指派
+                </button>
+            </div>
+
+            <!-- 唯讀檢視模式下的返回管理按鈕 -->
+            <div id="viewer-header-actions" class="hidden w-full sm:w-auto flex justify-end">
+                <button onclick="switchToManagerMode()" class="flex items-center gap-2 px-5 py-2.5 bg-slate-850 hover:bg-slate-950 text-white rounded-xl text-base font-bold transition shadow-sm bg-slate-800">
+                    <i data-lucide="user-cog" class="w-5 h-5"></i>
+                    進入編輯管理員模式
+                </button>
+            </div>
+        </div>
+    </header>
+
+    <!-- 主要內容區 -->
+    <main class="max-w-[1800px] mx-auto p-4 md:p-6 space-y-6">
+
+        <!-- 唯讀模式頂部橫幅 -->
+        <div id="viewer-banner" class="hidden bg-emerald-500 text-white px-5 py-4 rounded-2xl shadow-sm flex items-center gap-3">
+            <div class="p-2 bg-white/20 rounded-lg">
+                <i data-lucide="info" class="w-6 h-6"></i>
+            </div>
+            <div>
+                <p class="text-base font-bold">📢 您目前正在以【唯讀檢視模式】觀看派工單</p>
+                <p class="text-sm opacity-90">您可以點擊表格內任何一個「彩色的工作字卡」來查看該工作的注意事項與細項備註！</p>
+            </div>
+        </div>
+
+        <!-- ==================== 預派現場工作總表區 (可直接整區匯出圖檔) ==================== -->
+        <div id="export-target-area" class="bg-white rounded-2xl border border-slate-200 p-5 md:p-6 shadow-xs">
+            <div class="flex flex-col xl:flex-row justify-between items-start xl:items-center gap-4 pb-4 border-b border-slate-100 mb-4">
+                <div class="flex items-center gap-3.5 flex-1">
+                    <div class="p-3 bg-blue-50 text-blue-600 rounded-xl shadow-xs">
+                        <i data-lucide="clipboard-check" class="w-7 h-7"></i>
+                    </div>
+                    <div class="flex-1">
+                        <div class="flex flex-wrap items-center gap-x-5 gap-y-3">
+                            <h2 class="font-black text-slate-950 text-2xl tracking-wide">📋 預派明日現場工作總表</h2>
+                            
+                            <!-- 📆 派工日期自動生成與手動微調區 (放大並加入星期顯示) -->
+                            <div class="flex items-center gap-2.5 bg-blue-50/50 hover:bg-blue-50 border-2 border-blue-200 px-5 py-2 rounded-2xl shadow-xs transition-all">
+                                <span class="text-sm font-black text-blue-700 uppercase tracking-wider">派工日期:</span>
+                                <div class="flex items-center gap-1 font-black text-lg md:text-xl text-blue-900">
+                                    <input type="date" id="dispatch-date" onchange="updateDayOfWeekDisplay()" class="bg-transparent border-none p-0 focus:ring-0 focus:outline-hidden font-black cursor-pointer w-[145px]">
+                                    <span id="day-of-week-display" class="text-blue-700 font-black ml-1 text-xl"></span>
+                                </div>
+                            </div>
+                            
+                            <!-- 🎯 動態自動判定之完成狀態勳章容器 -->
+                            <div id="completion-status-badge"></div>
+                        </div>
+                        <p class="text-sm text-slate-550 mt-2">主要負責與各時段工作完全拆分。上下午工時與下班前工時分開統計，無時間限制的工作將以次數呈現。</p>
+                    </div>
+                </div>
+                
+                <!-- 功能按鈕區 -->
+                <div class="flex items-center gap-2.5 w-full xl:w-auto">
+                    <!-- 🔗 唯讀分享連結複製按鈕 (管理員專屬) -->
+                    <button onclick="copyReadOnlyShareLink()" class="manager-only w-full xl:w-auto flex items-center justify-center gap-2 px-5 py-3 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl text-sm font-bold transition shadow-md shadow-indigo-100">
+                        <i data-lucide="share-2" class="w-5 h-5"></i>
+                        🔗 複製唯讀分享連結
+                    </button>
+                    <!-- 📸 匯出圖檔 -->
+                    <button onclick="exportToImage()" class="w-full xl:w-auto flex items-center justify-center gap-2 px-5 py-3 bg-blue-600 hover:bg-blue-700 active:bg-blue-800 text-white rounded-xl text-sm font-bold transition shadow-md shadow-blue-100 hover:shadow-lg">
+                        <i data-lucide="image" class="w-5 h-5"></i>
+                        📸 匯出派工圖檔 (PNG)
+                    </button>
+                </div>
+            </div>
+            
+            <div class="grid grid-cols-1 lg:grid-cols-4 gap-6">
+                <!-- 左側：派工總表 (3/4 寬度) -->
+                <div class="lg:col-span-3 font-semibold">
+                    <!-- 表格容器 -->
+                    <div class="overflow-x-auto">
+                        <table class="w-full text-left border-collapse table-fixed">
+                            <thead>
+                                <tr class="border-b border-slate-150 text-slate-500 text-sm font-bold">
+                                    <th class="py-3.5 px-2.5 w-[12%]">出勤人員</th>
+                                    <th class="py-3.5 px-2.5 w-[13%]">🔑 主要負責</th>
+                                    <th class="py-3.5 px-2.5 w-[21%]">☀️ 上午指派工作</th>
+                                    <th class="py-3.5 px-2.5 w-[21%]">🌙 下午指派工作</th>
+                                    <th class="py-3.5 px-2.5 w-[17%]">🌆 下班前工作</th>
+                                    <th class="py-3.5 px-2 w-[8%] text-right">☀️整日工時</th>
+                                    <th class="py-3.5 px-2 w-[8%] text-right">🌆下班前工時</th>
+                                    <th class="py-3.5 px-2 w-[8%] text-right">📊交辦次數</th>
+                                </tr>
+                            </thead>
+                            <tbody id="summary-table-body" class="divide-y divide-slate-100 text-sm md:text-base">
+                                <!-- 即時內容會渲染於此 -->
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+
+                <!-- 右側：當日休假人員 (1/4 寬度) -->
+                <div class="bg-slate-50/50 rounded-xl border border-slate-150 p-5 flex flex-col">
+                    <div class="flex items-center justify-between pb-3.5 border-b border-slate-200/60 mb-4">
+                        <div class="flex items-center gap-2">
+                            <div class="p-1 bg-rose-50 text-rose-600 rounded-md">
+                                <i data-lucide="calendar-off" class="w-4 h-4"></i>
+                            </div>
+                            <h3 class="font-bold text-slate-900 text-sm">🏖️ 當日休假人員</h3>
+                        </div>
+                        <span id="offduty-count" class="bg-rose-50 text-rose-600 text-xs font-extrabold px-2.5 py-0.5 rounded-full">0</span>
+                    </div>
+                    
+                    <!-- 休假人員列表 -->
+                    <div id="off-duty-list" class="flex-1 space-y-2.5 overflow-y-auto max-h-[180px] pr-1">
+                        <!-- 休假人員卡片動態渲染 -->
+                    </div>
+
+                    <div class="mt-4 pt-3.5 border-t border-slate-200/60 font-bold manager-only">
+                        <button onclick="openAddModal('offduty')" class="w-full flex items-center justify-center gap-1.5 py-2.5 border border-dashed border-slate-200 hover:border-rose-300 text-slate-600 hover:text-rose-600 rounded-lg text-xs font-black transition bg-white hover:bg-rose-50/20">
+                            <i data-lucide="user-plus" class="w-3.5 h-3.5"></i>
+                            登記休假人員
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- ==================== 1-6 欄全新直排看板派工區 (編輯模式下才顯示) ==================== -->
+        <div id="manager-kanban-board" class="manager-only grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6 gap-4 min-h-[600px]">
+
+            <!-- 第一欄：人員 (在勤) -->
+            <div class="bg-white rounded-2xl border border-slate-200 p-4 shadow-sm flex flex-col h-[620px]">
+                <div class="flex justify-between items-center pb-2.5 border-b border-slate-100 mb-3">
+                    <div class="flex items-center gap-1.5">
+                        <span class="w-2 h-2 rounded-full bg-indigo-500"></span>
+                        <h2 class="font-bold text-slate-800 text-sm">1. 當日人員 (在勤)</h2>
+                        <span id="staff-count" class="bg-indigo-50 text-indigo-700 text-xs font-bold px-1.5 py-0.2 rounded-full">0</span>
+                    </div>
+                    <button onclick="openAddModal('staff')" class="p-1 text-indigo-600 hover:bg-indigo-50 rounded-md" title="新增在勤人員">
+                        <i data-lucide="user-plus" class="w-4.5 h-4.5"></i>
+                    </button>
+                </div>
+                <!-- 列表容器 -->
+                <div id="staff-list" class="flex-1 overflow-y-auto space-y-3.5 pr-0.5">
+                    <!-- 人員卡片會動態生成於此 -->
+                </div>
+            </div>
+
+            <!-- 第二欄：主要負責 (可拖曳) -->
+            <div class="bg-white rounded-2xl border border-slate-200 p-4 shadow-sm flex flex-col h-[620px]">
+                <div class="flex justify-between items-center pb-2.5 border-b border-slate-100 mb-3">
+                    <h3 class="font-bold text-slate-700 text-sm flex items-center gap-1">
+                        <span class="w-2 h-2 rounded-full bg-emerald-500"></span> 2. 主要負責
+                        <span id="roles-count" class="bg-emerald-50 text-emerald-700 text-xs font-bold px-1.5 py-0.2 rounded-full">0</span>
+                    </h3>
+                    <button onclick="openAddModal('roles')" class="p-1 text-emerald-600 hover:bg-emerald-50 rounded-md" title="新增負責項目">
+                        <i data-lucide="plus" class="w-4.5 h-4.5"></i>
+                    </button>
+                </div>
+                <div id="roles-list" class="flex-1 overflow-y-auto space-y-2 pr-0.5">
+                    <!-- 主要負責卡片動態生成 -->
+                </div>
+            </div>
+
+            <!-- 第三欄：固定工作及時間 (可拖曳) -->
+            <div class="bg-white rounded-2xl border border-slate-200 p-4 shadow-sm flex flex-col h-[620px]">
+                <div class="flex justify-between items-center pb-2.5 border-b border-slate-100 mb-3">
+                    <h3 class="font-bold text-slate-700 text-sm flex items-center gap-1">
+                        <span class="w-2 h-2 rounded-full bg-amber-500"></span> 3. 固定工作
+                        <span id="fixed-count" class="bg-amber-50 text-amber-700 text-xs font-bold px-1.5 py-0.2 rounded-full">0</span>
+                    </h3>
+                    <button onclick="openAddModal('fixed')" class="p-1 text-amber-600 hover:bg-amber-50 rounded-md" title="新增固定工作">
+                        <i data-lucide="plus" class="w-4.5 h-4.5"></i>
+                    </button>
+                </div>
+                <div id="fixed-list" class="flex-1 overflow-y-auto space-y-2 pr-0.5">
+                    <!-- 固定工作卡片動態生成 -->
+                </div>
+            </div>
+
+            <!-- 第四欄：機動性工作 (可拖曳) -->
+            <div class="bg-white rounded-2xl border border-slate-200 p-4 shadow-sm flex flex-col h-[620px]">
+                <div class="flex justify-between items-center pb-2.5 border-b border-slate-100 mb-3">
+                    <h3 class="font-bold text-slate-700 text-sm flex items-center gap-1">
+                        <span class="w-2 h-2 rounded-full bg-rose-500"></span> 4. 機動工作
+                        <span id="flexible-count" class="bg-rose-50 text-rose-700 text-xs font-bold px-1.5 py-0.2 rounded-full">0</span>
+                    </h3>
+                    <button onclick="openAddModal('flexible')" class="p-1 text-rose-600 hover:bg-rose-50 rounded-md" title="新增機動工作">
+                        <i data-lucide="plus" class="w-4.5 h-4.5"></i>
+                    </button>
+                </div>
+                <div id="flexible-list" class="flex-1 overflow-y-auto space-y-2 pr-0.5">
+                    <!-- 機動工作卡片動態生成 -->
+                </div>
+            </div>
+
+            <!-- 第五欄：下班前工作 (可拖曳) -->
+            <div class="bg-white rounded-2xl border border-slate-200 p-4 shadow-sm flex flex-col h-[620px]">
+                <div class="flex justify-between items-center pb-2.5 border-b border-slate-100 mb-3">
+                    <h3 class="font-bold text-slate-700 text-sm flex items-center gap-1" title="限拖曳至下班前派工區">
+                        <span class="w-2 h-2 rounded-full bg-fuchsia-500"></span> 5. 下班前工作 🔒
+                        <span id="closingTasks-count" class="bg-fuchsia-50 text-fuchsia-700 text-xs font-bold px-1.5 py-0.2 rounded-full">0</span>
+                    </h3>
+                    <button onclick="openAddModal('closingTasks')" class="p-1 text-fuchsia-600 hover:bg-fuchsia-50 rounded-md" title="新增下班前工作">
+                        <i data-lucide="plus" class="w-4.5 h-4.5"></i>
+                    </button>
+                </div>
+                <div id="closingTasks-list" class="flex-1 overflow-y-auto space-y-2 pr-0.5">
+                    <!-- 下班前工作卡片動態生成 -->
+                </div>
+            </div>
+
+            <!-- 第六欄：突發性工作 (可拖曳) -->
+            <div class="bg-white rounded-2xl border border-slate-200 p-4 shadow-sm flex flex-col h-[620px]">
+                <div class="flex justify-between items-center pb-2.5 border-b border-slate-100 mb-3">
+                    <h3 class="font-bold text-slate-700 text-sm flex items-center gap-1">
+                        <span class="w-2 h-2 rounded-full bg-cyan-500"></span> 6. 突發工作
+                        <span id="emergencyTasks-count" class="bg-cyan-50 text-cyan-700 text-xs font-bold px-1.5 py-0.2 rounded-full">0</span>
+                    </h3>
+                    <button onclick="openAddModal('emergencyTasks')" class="p-1 text-cyan-600 hover:bg-cyan-50 rounded-md" title="新增突發工作">
+                        <i data-lucide="plus" class="w-4.5 h-4.5"></i>
+                    </button>
+                </div>
+                <div id="emergencyTasks-list" class="flex-1 overflow-y-auto space-y-2 pr-0.5">
+                    <!-- 突發性工作卡片動態生成 -->
+                </div>
+            </div>
+
+        </div>
+    </main>
+
+    <!-- ==================== 彈出視窗 1: 查看及編輯工作細項 ==================== -->
+    <div id="detail-modal" class="fixed inset-0 bg-slate-900/60 backdrop-blur-sm flex items-center justify-center hidden p-4">
+        <div class="bg-white rounded-2xl shadow-2xl w-full max-w-lg overflow-hidden transform transition-all">
+            <!-- 視窗頭部 -->
+            <div class="px-6 py-5 border-b border-slate-100 flex justify-between items-center bg-slate-50">
+                <div class="flex items-center gap-2">
+                    <div id="modal-icon-container" class="p-2 rounded-lg text-white">
+                        <i id="modal-icon" data-lucide="file-text" class="w-6 h-6"></i>
+                    </div>
+                    <h3 class="font-black text-slate-800 text-xl" id="detail-modal-title">項目詳情與設定</h3>
+                </div>
+                <button onclick="closeDetailModal()" class="text-slate-400 hover:text-slate-600 p-1 rounded-lg hover:bg-slate-100 transition">
+                    <i data-lucide="x" class="w-6 h-6"></i>
+                </button>
+            </div>
+            <!-- 視窗內容 -->
+            <div class="p-6 space-y-5">
+                <input type="hidden" id="edit-item-type">
+                <input type="hidden" id="edit-item-id">
+
+                <!-- 項目名稱 -->
+                <div>
+                    <label class="block text-sm font-bold text-slate-500 uppercase tracking-wider mb-2">項目名稱</label>
+                    <input type="text" id="edit-item-name" class="w-full px-3.5 py-2.5 border border-slate-200 rounded-lg focus:outline-hidden focus:ring-2 focus:ring-blue-500 text-base font-bold">
+                </div>
+
+                <!-- 時間 (如果是固定工作才顯示) -->
+                <div id="edit-time-container">
+                    <label class="block text-sm font-bold text-slate-500 uppercase tracking-wider mb-2">預計所需時間</label>
+                    <input type="text" id="edit-item-time" placeholder="例如: 1小時" class="w-full px-3.5 py-2.5 border border-slate-200 rounded-lg focus:outline-hidden focus:ring-2 focus:ring-blue-500 text-base font-medium">
+                </div>
+
+                <!-- 注意事項與細項說明 -->
+                <div>
+                    <label class="block text-sm font-bold text-slate-500 uppercase tracking-wider mb-2">注意事項及作業細項</label>
+                    <textarea id="edit-item-note" rows="6" placeholder="該工作目前無其他注意事項..." class="w-full px-3.5 py-2.5 border border-slate-200 rounded-lg focus:outline-hidden focus:ring-2 focus:ring-blue-500 text-base text-slate-700 leading-relaxed font-medium"></textarea>
+                </div>
+
+                <!-- 👥 新增：共同分擔此工作 (工時減半) -- 僅在編輯「已指派任務」時顯示 -->
+                <div id="split-task-container" class="border-t border-slate-200 pt-5 hidden">
+                    <label class="block text-sm font-black text-slate-700 uppercase tracking-wider mb-2">👥 共同分擔此工作 (工時減半)</label>
+                    <div class="flex gap-2.5">
+                        <select id="split-staff-select" class="flex-1 px-4 py-2.5 border border-slate-200 rounded-lg focus:outline-hidden focus:ring-2 focus:ring-emerald-500 text-base font-semibold">
+                            <option value="">選擇共同分擔的人員...</option>
+                        </select>
+                        <button onclick="splitAssignedTask()" class="manager-only px-5 py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-base font-bold transition shadow-xs">
+                            確認拆分
+                        </button>
+                    </div>
+                    <p class="text-xs text-slate-500 mt-2">此操作會將目前工時除以 2，並在所選人員身上複製一份相同的任務。</p>
+                </div>
+            </div>
+            <!-- 視窗腳部：已優化按鈕佈局與新增「複製卡片」功能 -->
+            <div class="px-6 py-4 bg-slate-50 border-t border-slate-100 flex flex-wrap items-center justify-between gap-3">
+                <div class="flex items-center gap-2">
+                    <!-- 徹底刪除按鈕 (紅框警示，明確區隔) -->
+                    <button id="detail-delete-btn" onclick="deleteItemFromModal()" class="manager-only flex items-center gap-1.5 px-4 py-2.5 border border-rose-200 text-rose-600 hover:bg-rose-50 rounded-lg text-sm font-black">
+                        <i data-lucide="trash-2" class="w-4.5 h-4.5"></i>
+                        徹底刪除
+                    </button>
+                    <!-- 複製此卡片按鈕 (管理員編輯模式專屬) -->
+                    <button id="detail-duplicate-btn" onclick="duplicateItemFromModal()" class="manager-only flex items-center gap-1.5 px-4 py-2.5 border border-slate-200 text-slate-700 hover:bg-slate-50 rounded-lg text-sm font-black bg-white shadow-xs">
+                        <i data-lucide="copy" class="w-4.5 h-4.5"></i>
+                        複製卡片
+                    </button>
+                </div>
+                <div class="flex gap-2.5 ml-auto">
+                    <button onclick="closeDetailModal()" id="detail-close-btn" class="px-5 py-2.5 border border-slate-200 hover:bg-slate-100 rounded-lg text-base font-bold text-slate-600 transition">取消</button>
+                    <button id="detail-save-btn" onclick="saveItemDetails()" class="manager-only px-5 py-2.5 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-base font-bold transition shadow-sm">儲存</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+
+    <!-- ==================== 彈出視窗 2: 新增卡片 ==================== -->
+    <div id="add-modal" class="fixed inset-0 bg-slate-900/60 backdrop-blur-sm flex items-center justify-center hidden p-4">
+        <div class="bg-white rounded-2xl w-full max-w-md p-6">
+            <h3 id="add-modal-title" class="font-black mb-4 text-slate-800 text-xl">新增項目</h3>
+            <input type="hidden" id="add-item-type">
+            <div class="space-y-4">
+                <div>
+                    <label id="add-name-label" class="block text-sm font-bold text-slate-500 mb-2">名稱</label>
+                    <input type="text" id="add-item-name" class="w-full border p-2.5 rounded-lg text-base font-bold" placeholder="名稱">
+                </div>
+                <div id="add-time-container">
+                    <label class="block text-sm font-bold text-slate-500 mb-2">時間</label>
+                    <input type="text" id="add-item-time" class="w-full border p-2.5 rounded-lg text-base font-medium" placeholder="工時">
+                </div>
+                <div>
+                    <label class="block text-sm font-bold text-slate-500 mb-2">備註</label>
+                    <textarea id="add-item-note" class="w-full border p-2.5 rounded-lg text-base font-medium" placeholder="備註" rows="3"></textarea>
+                </div>
+            </div>
+            <div class="flex justify-end gap-2.5 mt-5 pt-4 border-t">
+                <button onclick="closeAddModal()" class="px-5 py-2.5 text-base font-bold text-slate-500">取消</button>
+                <button onclick="addNewCard()" class="bg-blue-600 text-white px-5 py-2.5 rounded-lg text-base font-bold shadow-md">確認新增</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- ==================== 自訂確認視窗 (替代 confirm) ==================== -->
+    <div id="confirm-modal" class="fixed inset-0 bg-black/70 flex items-center justify-center hidden p-4">
+        <div class="bg-white rounded-2xl shadow-2xl w-full max-w-sm p-6 space-y-4">
+            <div class="flex items-center gap-3 text-rose-600">
+                <i data-lucide="alert-triangle" class="w-8 h-8"></i>
+                <h3 class="font-black text-xl text-slate-900" id="confirm-title">確認操作</h3>
+            </div>
+            <p class="text-base text-slate-650 leading-relaxed font-medium" id="confirm-message"></p>
+            <div class="flex justify-end gap-3 pt-2">
+                <button id="confirm-cancel-btn" class="px-5 py-2.5 border rounded-lg text-base font-bold text-slate-500 hover:bg-slate-50 transition">取消</button>
+                <button id="confirm-ok-btn" class="px-5 py-2.5 bg-rose-600 hover:bg-rose-700 text-white rounded-lg text-base font-bold shadow-lg transition">確認刪除</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- 自訂提示通知 (Toast) -->
+    <div id="toast" class="fixed bottom-5 right-5 bg-slate-900 text-white px-5 py-4 rounded-xl shadow-lg flex items-center gap-2.5 transform translate-y-20 opacity-0 transition-all duration-300 z-[200]">
+        <i id="toast-icon" data-lucide="info" class="w-5 h-5 text-blue-400"></i>
+        <span id="toast-message" class="text-base font-bold"></span>
+    </div>
+
+    <script>
+        // ==================== 初始化資料 ====================
+        const defaultData = {
+            staff: [], // 預設所有人在假單
+            offDuty: [ // 人員預設列在休假名單中，全部清空身上指派
+                { id: 'staff-1', name: '林威豪', assignments: [] },
+                { id: 'staff-2', name: '洪祥智', assignments: [] },
+                { id: 'staff-3', name: '徐意婷', assignments: [] },
+                { id: 'staff-4', name: '楊雅棠', assignments: [] },
+                { id: 'staff-5', name: '吳岱澂', assignments: [] },
+                { id: 'staff-6', name: '賴哲賢', assignments: [] },
+                { id: 'staff-7', name: '林楨敏', assignments: [] }
+            ],
+            roles: [
+                { id: 'role-1', name: '主控', note: '當日派工，主控人員表單確認，部門溝通，訊息接收，協助各員，列印單據；維持63-6外場及辦公桌面基本整潔，監督各員環境工作整潔' },
+                { id: 'role-2', name: '63-7', note: '63-7下層冰庫香菇類整理及調撥單發料，整體63-7儲位規劃，7:00上班協助處理理貨提出需求的原料，出日燦及西螺貨物，協助總量撿貨；維持63-7冰庫基本整潔' },
+                { id: 'role-3', name: '63-7輔', note: '63-7冰庫雜菇類整理及調撥單發料，協助63-7負責人，協助香菇進貨疊板，隔日通路備貨出貨對貨；協助維持63-7外場基本整潔' },
+                { id: 'role-4', name: '63-6理貨倉', note: '63-6上層調撥單發料，63-6冰庫上下層整理，儲位規劃，63-6冰庫內進貨上貨；維持63-6冰庫內基本整潔' },
+                { id: 'role-5', name: '63-6輔', note: '協助理貨倉負責人，調撥待處理倉及銷退貨處理，理貨倉雜菇類安全庫存清點補貨，支援隔日通路出貨、備貨、進貨；維持63-5外場及碼頭基本整潔' }
+            ],
+            fixed: [
+                { id: 'fixed-1', name: '家樂福大園倉備貨', time: '1個小時', note: '1. 列印外箱貼紙。\n2. 確認出貨品名及數量。\n3. 貼好外箱貼後拉至大園倉專用暫存區。' },
+                { id: 'fixed-2', name: '家樂福西螺倉備貨', time: '1個小時', note: '1. 列印外箱貼紙。\n2. 確認出貨品名及數量。\n3. 貼好外箱貼後拉至西螺倉專用暫存區。' },
+                { id: 'fixed-3', name: '63-6倉庫整理', time: '1個小時', note: '1. 確認貨物日期，並保持最大原則先進先出。\n2. 將同品項商品集中擺放。\n3. 將產出的棧板.束繩歸位，並將倉庫內的PE膜回收及垃圾處理。' },
+                { id: 'fixed-4', name: '63-7倉庫整理', time: '1個小時', note: '1. 確認貨物日期，並保持最大原則先進先出。\n2. 將同品項商品集中擺放。\n3. 將產出的棧板.束繩歸位，並將倉庫內的PE膜回收及垃圾處理。' }
+            ],
+            flexible: [
+                { id: 'flex-1', name: '63-6進貨主驗收', note: '1. 司機回廠時主動驗收處理。\n2. 檢查外箱有無破損。\n3. 確認貨物品質.品規.數量是否正確且符合規範。' },
+                { id: 'flex-2', name: '廠商自取', note: '1. 核對自取廠商身分與取貨單號。\n2. 引導至指定出貨口並協助裝車。\n3. 請司機/經辦人員簽名留存。' },
+                { id: 'flex-3', name: '環境整理', note: '1. 清掃地面粉塵及垃圾。\n2. 檢查消防設施、逃生通道暢通。\n3. 填寫當日環境檢查日誌。' }
+            ],
+            closingTasks: [
+                { id: 'close-1', name: '隔日出貨區拍照上傳群組', note: '確認隔日出貨商品整齊排列後拍照，並上傳至指定群組存查。' },
+                { id: 'close-2', name: '香菇庫存清點', note: '清點今日庫存並確認剩餘數量是否與系統相符. ' },
+                { id: 'close-3', name: '理貨倉補貨確認', note: '確認理貨倉之安全庫存已完成補貨，確保隔日作業順暢。' },
+                { id: 'close-4', name: '碼頭淨空及堆高機.拖板車充電及歸位', note: '淨空碼頭所有通道，並將堆高機與拖板車移至充電區插電歸位。' }
+            ],
+            emergencyTasks: [ // 突發性工作項目
+                { id: 'emer-1', name: '拍賣備貨', note: '突發性拍賣需求緊急備貨、打包、並完成對單。' },
+                { id: 'emer-2', name: '原芳備貨', note: '原芳通路緊急備貨、棧板堆疊包膠膜作業。' }
+            ]
+        };
+
+        // 當前系統中的所有資料
+        let appData = {};
+        let confirmCallback = null;
+        let isViewerMode = false; // 是否在唯讀模式中
+
+        // 👥 共同分擔時追蹤當前點選的指派人員與其索引
+        let activeStaffId = null;
+        let activeAssignmentIndex = null;
+
+        // 初始化
+        window.addEventListener('DOMContentLoaded', () => {
+            checkViewMode(); // 優先檢查網址是否帶有唯讀參數
+            initDefaultDate(); // 自動帶入明日日期
+            renderBoard();
+            lucide.createIcons();
+            
+            // 監聽鍵盤 ESC 鍵以關閉視窗
+            window.addEventListener('keydown', (e) => {
+                if (e.key === 'Escape') {
+                    closeDetailModal();
+                    closeAddModal();
+                    closeConfirmModal();
+                }
+            });
+
+            // 綁定自訂確認視窗事件
+            document.getElementById('confirm-cancel-btn').addEventListener('click', closeConfirmModal);
+            document.getElementById('confirm-ok-btn').addEventListener('click', () => {
+                if (confirmCallback) confirmCallback();
+                closeConfirmModal();
+            });
+        });
+
+        // 🚨 檢測網址參數：決定是否開啟「同仁唯讀檢視模式」
+        function checkViewMode() {
+            const urlParams = new URLSearchParams(window.location.search);
+            const mode = urlParams.get('mode');
+            const sharedDataStr = urlParams.get('d');
+
+            if (mode === 'viewer') {
+                isViewerMode = true;
+                document.body.classList.add('viewer-active');
+                
+                // 調整網頁標題
+                const titleEl = document.getElementById('main-title');
+                const subtitleEl = document.getElementById('main-subtitle');
+                if (titleEl) titleEl.innerText = "明日現場派工單【唯讀檢視】";
+                if (subtitleEl) subtitleEl.innerText = "點擊下方表格內任何一項任務即可查看工作細項與注意事項";
+
+                // 顯示唯讀專用介面元素
+                const banner = document.getElementById('viewer-banner');
+                const actions = document.getElementById('viewer-header-actions');
+                if (banner) banner.classList.remove('hidden');
+                if (actions) actions.classList.remove('hidden');
+                
+                // 鎖定日期選擇器
+                const dateInput = document.getElementById('dispatch-date');
+                if (dateInput) {
+                    dateInput.disabled = true;
+                    dateInput.classList.add('opacity-80', 'cursor-not-allowed');
+                }
+
+                // 修改彈窗按鈕細節
+                const detailTitle = document.getElementById('detail-modal-title');
+                const detailCloseBtn = document.getElementById('detail-close-btn');
+                if (detailTitle) detailTitle.innerText = "工作細項與注意事項";
+                if (detailCloseBtn) detailCloseBtn.innerText = "關閉視窗";
+
+                // 解碼分享連結中的數據
+                if (sharedDataStr) {
+                    try {
+                        const decodedJson = decodeURIComponent(atob(sharedDataStr).split('').map(function(c) {
+                            return '%' + ('00' + c.charCodeAt(0).toString(16)).slice(-2);
+                        }).join(''));
+                        appData = JSON.parse(decodedJson);
+                    } catch (e) {
+                        console.error("解碼分享數據失敗:", e);
+                        showToast("讀取派工單失敗，已為您載入本機預設值！", "alert-triangle", "text-red-500");
+                        loadData();
+                    }
+                } else {
+                    loadData();
+                }
+            } else {
+                isViewerMode = false;
+                document.body.classList.remove('viewer-active');
+                loadData();
+            }
+        }
+
+        // 當唯讀模式下的同仁想要切換回編輯模式
+        function switchToManagerMode() {
+            const url = new URL(window.location.href);
+            url.searchParams.delete('mode');
+            url.searchParams.delete('d');
+            window.location.href = url.toString();
+        }
+
+        // 生成並複製「唯讀分享連結」給其他人看
+        function copyReadOnlyShareLink() {
+            const dateInput = document.getElementById('dispatch-date');
+            const date = dateInput ? dateInput.value : '';
+
+            const shareData = {
+                staff: appData.staff || [],
+                offDuty: appData.offDuty || [],
+                roles: appData.roles || [],
+                fixed: appData.fixed || [],
+                flexible: appData.flexible || [],
+                closingTasks: appData.closingTasks || [],
+                emergencyTasks: appData.emergencyTasks || []
+            };
+
+            const jsonStr = JSON.stringify(shareData);
+            
+            try {
+                // 安全地將 UTF-8 中文字串轉換為 Base64 編碼
+                const base64 = btoa(encodeURIComponent(jsonStr).replace(/%([0-9A-F]{2})/g, function(match, p1) {
+                    return String.fromCharCode('0x' + p1);
+                }));
+
+                const url = new URL(window.location.href);
+                url.searchParams.set('mode', 'viewer');
+                url.searchParams.set('d', base64);
+
+                // 使用內建優化的 clipboard 複製方案
+                const tempInput = document.createElement('textarea');
+                tempInput.value = url.toString();
+                tempInput.style.position = 'fixed';
+                document.body.appendChild(tempInput);
+                tempInput.select();
+                
+                const successful = document.execCommand('copy');
+                document.body.removeChild(tempInput);
+
+                if (successful) {
+                    showToast('已產生加密分享網址！趕快發到 LINE 群組給同仁吧。', 'link', 'text-indigo-500');
+                } else {
+                    showToast('複製網址失敗，請手動複製地址列。', 'x', 'text-red-550');
+                }
+            } catch (err) {
+                console.error("生成連結錯誤：", err);
+                showToast('產生分享網址失敗，資料可能過於胖大！', 'x', 'text-red-500');
+            }
+        }
+
+        // 讀取資料並提供「防禦性自動升級補全」
+        function loadData() {
+            const saved = localStorage.getItem('dispatch_system_data_v6');
+            if (saved) {
+                try {
+                    appData = JSON.parse(saved);
+                    if (!appData.emergencyTasks) {
+                        appData.emergencyTasks = JSON.parse(JSON.stringify(defaultData.emergencyTasks));
+                    }
+                    if (appData.staff) {
+                        appData.staff.forEach(p => {
+                            if (!p.assignments) p.assignments = [];
+                        });
+                    }
+                    if (appData.offDuty) {
+                        appData.offDuty.forEach(p => {
+                            if (!p.assignments) p.assignments = [];
+                        });
+                    }
+                } catch (e) {
+                    appData = JSON.parse(JSON.stringify(defaultData));
+                }
+            } else {
+                appData = JSON.parse(JSON.stringify(defaultData));
+            }
+        }
+
+        // 儲存資料到 LocalStorage (唯讀模式下不儲存)
+        function saveData() {
+            if (isViewerMode) return;
+            localStorage.setItem('dispatch_system_data_v6', JSON.stringify(appData));
+        }
+
+        // 自動帶入明天的日期
+        function initDefaultDate() {
+            if (isViewerMode) {
+                updateDayOfWeekDisplay();
+                return;
+            }
+
+            const today = new Date();
+            const tomorrow = new Date(today);
+            tomorrow.setDate(today.getDate() + 1);
+
+            const yyyy = tomorrow.getFullYear();
+            const mm = String(tomorrow.getMonth() + 1).padStart(2, '0');
+            const dd = String(tomorrow.getDate()).padStart(2, '0');
+            
+            const dateInput = document.getElementById('dispatch-date');
+            if (dateInput) {
+                dateInput.value = `${yyyy}-${mm}-${dd}`;
+            }
+            updateDayOfWeekDisplay();
+        }
+
+        // 📅 新增：手動/自動計算日期並更新「星期幾」顯示
+        function updateDayOfWeekDisplay() {
+            const dateInput = document.getElementById('dispatch-date');
+            const displayEl = document.getElementById('day-of-week-display');
+            if (!dateInput || !displayEl) return;
+
+            const selectedDateValue = dateInput.value;
+            if (!selectedDateValue) {
+                displayEl.innerText = '';
+                return;
+            }
+
+            const days = ['日', '一', '二', '三', '四', '五', '六'];
+            const dateObj = new Date(selectedDateValue);
+            const dayIndex = dateObj.getDay();
+            
+            if (!isNaN(dayIndex)) {
+                displayEl.innerText = `(${days[dayIndex]})`;
+            } else {
+                displayEl.innerText = '';
+            }
+        }
+
+        // 智慧型文字工時加總解析器
+        function calculateTotalHours(assignments) {
+            let total = 0;
+            const targetAsgs = assignments || [];
+            targetAsgs.forEach(asg => {
+                if (asg && asg.time) {
+                    const matchHour = asg.time.match(/(\d+(\.\d+)?)\s*(個)?\s*(小時|h|Hour)/i);
+                    if (matchHour) {
+                        total += parseFloat(matchHour[1]);
+                    } else {
+                        const matchMin = asg.time.match(/(\d+)\s*(分鐘|min|m)/i);
+                        if (matchMin) {
+                            total += parseInt(matchMin[1], 10) / 60;
+                        } else {
+                            const matchNum = asg.time.match(/(\d+(\.\d+)?)/);
+                            if (matchNum) {
+                                total += parseFloat(matchNum[1]);
+                            }
+                        }
+                    }
+                }
+            });
+            return Math.round(total * 100) / 100;
+        }
+
+        // 計算無時間任務次數的函數 (排除崗位 type === 'roles' 項目)
+        function countNoTimeTasks(assignments) {
+            const targetAsgs = assignments || [];
+            return targetAsgs.filter(asg => asg && asg.type !== 'roles' && !asg.time).length;
+        }
+
+        // 觸發自訂重置
+        function triggerResetDefault() {
+            openConfirmModal(
+                '確定重置預設資料？', 
+                '此操作將會清空目前的所有工作指派，並重新將所有人員歸入休假狀態。您自行新增的卡片也將會被清除！', 
+                () => {
+                    appData = JSON.parse(JSON.stringify(defaultData));
+                    saveData();
+                    initDefaultDate();
+                    renderBoard();
+                    showToast('已恢復初始乾淨排班配置！', 'check', 'text-emerald-500');
+                }
+            );
+        }
+
+        // 觸發自訂清除所有派工
+        function triggerClearAllDispatches() {
+            openConfirmModal(
+                '確定清空所有任務指派？', 
+                '此操作將移除今日在勤人員身上拖曳的所有工作指派，保留在勤狀態，重新開始排班。', 
+                () => {
+                    const activeStaffs = appData.staff || [];
+                    activeStaffs.forEach(person => {
+                        person.assignments = [];
+                    });
+                    saveData();
+                    renderBoard();
+                    showToast('已清空今日所有指派！', 'trash-2', 'text-amber-500');
+                }
+            );
+        }
+
+        // 自訂確認對話框控制
+        function openConfirmModal(title, message, callback) {
+            const modalTitle = document.getElementById('confirm-title');
+            const modalMsg = document.getElementById('confirm-message');
+            const modal = document.getElementById('confirm-modal');
+            if (modalTitle) modalTitle.innerText = title;
+            if (modalMsg) modalMsg.innerText = message;
+            confirmCallback = callback;
+            if (modal) modal.classList.remove('hidden');
+        }
+
+        function closeConfirmModal() {
+            const modal = document.getElementById('confirm-modal');
+            if (modal) modal.classList.add('hidden');
+            confirmCallback = null;
+        }
+
+        // ==================== 人員在勤 / 休假狀態切換 ====================
+        function setStaffOffDuty(staffId) {
+            const activeList = appData.staff || [];
+            const offList = appData.offDuty || [];
+            const index = activeList.findIndex(s => s.id === staffId);
+            if (index === -1) return;
+            
+            const person = activeList.splice(index, 1)[0];
+            person.assignments = []; // 移至休假時自動清空身上派工
+
+            offList.push({
+                id: person.id,
+                name: person.name,
+                assignments: []
+            });
+            
+            appData.staff = activeList;
+            appData.offDuty = offList;
+            
+            saveData();
+            renderBoard();
+            showToast(`${person.name} 已設為當日休假`, 'calendar-off', 'text-rose-500');
+        }
+
+        // 恢復人員出勤
+        function setStaffActive(holidayStaffId) {
+            const activeList = appData.staff || [];
+            const offList = appData.offDuty || [];
+            const index = offList.findIndex(s => s.id === holidayStaffId);
+            if (index === -1) return;
+            
+            const person = offList.splice(index, 1)[0];
+            
+            activeList.push({
+                id: person.id,
+                name: person.name,
+                assignments: []
+            });
+            
+            appData.staff = activeList;
+            appData.offDuty = offList;
+            
+            saveData();
+            renderBoard();
+            showToast(`${person.name} 已恢復當日出勤`, 'user-check', 'text-emerald-500');
+        }
+
+        // ==================== 渲染看板與總表介面 ====================
+        function renderBoard() {
+            const activeList = appData.staff || [];
+            const offList = appData.offDuty || [];
+            const rolesList = appData.roles || [];
+            const fixedList = appData.fixed || [];
+            const flexibleList = appData.flexible || [];
+            const closingList = appData.closingTasks || [];
+            const emergencyList = appData.emergencyTasks || [];
+
+            // 防禦型 DOM 元素安全寫入
+            const safeSetText = (id, text) => {
+                const el = document.getElementById(id);
+                if (el) el.innerText = text;
+            };
+
+            safeSetText('staff-count', activeList.length);
+            safeSetText('offduty-count', offList.length);
+            safeSetText('roles-count', rolesList.length);
+            safeSetText('fixed-count', fixedList.length);
+            safeSetText('flexible-count', flexibleList.length);
+            safeSetText('closingTasks-count', closingList.length);
+            safeSetText('emergencyTasks-count', emergencyList.length);
+
+            // 💡 智慧型自動偵測：2~5欄的工作是否被全部清空分派
+            const remainingPrePlannedCount = rolesList.length + fixedList.length + flexibleList.length + closingList.length;
+            const completionContainer = document.getElementById('completion-status-badge');
+            
+            if (completionContainer) {
+                if (remainingPrePlannedCount === 0 && activeList.length > 0) {
+                    completionContainer.innerHTML = `
+                        <span class="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-full text-xs font-bold bg-emerald-500 text-white animate-pulse shadow-md">
+                            <i data-lucide="check-circle" class="w-4 h-4"></i> 🎉 已完成派工
+                        </span>
+                    `;
+                } else {
+                    completionContainer.innerHTML = `
+                        <span class="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-bold bg-blue-100 text-blue-700">
+                            <i data-lucide="loader" class="w-3.5 h-3.5 animate-spin"></i> 派工中 (剩餘 ${remainingPrePlannedCount} 項預計工作)
+                        </span>
+                    `;
+                }
+            }
+
+            // 1. 渲染上方「今日出勤與派工總表」
+            renderSummaryTable();
+
+            // 2. 渲染右側「當日休假人員」列表
+            renderOffDutyList();
+
+            // 🚨 如果在唯讀模式，直接跳過下方可拖曳工作欄位的渲染，節省效能與資源
+            if (isViewerMode) return;
+
+            // 3. 渲染人員列表
+            const staffList = document.getElementById('staff-list');
+            if (staffList) {
+                staffList.innerHTML = '';
+                if (activeList.length === 0) {
+                    staffList.innerHTML = `
+                        <div class="text-center py-12 px-4 text-slate-400 text-xs border border-dashed border-slate-200 rounded-xl bg-slate-50/50">
+                            <i data-lucide="users-2" class="w-8 h-8 mx-auto mb-2 text-slate-300"></i>
+                            今日無人在勤<br>請點選右上方休假名單旁的「出勤」按鈕
+                        </div>`;
+                } else {
+                    activeList.forEach(person => {
+                        const card = document.createElement('div');
+                        card.className = 'bg-slate-50 border border-slate-200 rounded-xl p-3.5 transition shadow-xs hover:shadow-md flex flex-col gap-3 min-h-[380px]';
+                        card.setAttribute('data-id', person.id);
+
+                        const currentAsgs = person.assignments || [];
+                        const primaryAsgs = currentAsgs.filter(a => a && a.shift === 'primary');
+                        const morningAsgs = currentAsgs.filter(a => a && a.shift === 'morning');
+                        const afternoonAsgs = currentAsgs.filter(a => a && a.shift === 'afternoon');
+                        const closingAsgs = currentAsgs.filter(a => a && a.shift === 'closing');
+
+                        // 獨立分析上下午、下班前工時及無工時次數 (放大字體)
+                        const morningHalfTime = calculateTotalHours(currentAsgs.filter(a => a && (a.shift === 'morning' || a.shift === 'afternoon')));
+                        const closingHalfTime = calculateTotalHours(currentAsgs.filter(a => a && a.shift === 'closing'));
+                        const noTimeCount = countNoTimeTasks(currentAsgs);
+
+                        // 人員卡片頭部 (放大字體與適度調整排版間距)
+                        let headerHTML = `
+                            <div class="flex justify-between items-start pb-2 border-b border-slate-200/60">
+                                <div class="flex items-center gap-2">
+                                    <div class="w-8 h-8 rounded-full bg-indigo-600 text-white font-bold text-sm flex items-center justify-center">
+                                        ${person.name.charAt(0)}
+                                    </div>
+                                    <div>
+                                        <h3 class="font-bold text-slate-800 text-base">${person.name}</h3>
+                                        <div class="flex flex-col gap-1 mt-1">
+                                            <div class="flex items-center gap-1.5">
+                                                <span class="text-xs text-indigo-600 font-bold bg-indigo-50 px-1.5 py-0.2 rounded-sm">在勤</span>
+                                                <span class="text-xs text-blue-600 font-bold bg-blue-50 px-1.5 py-0.2 rounded-sm flex items-center gap-0.5">
+                                                    <i data-lucide="clock" class="w-3 h-3"></i> ☀️🌙 ${morningHalfTime}h / 🌆 ${closingHalfTime}h
+                                                </span>
+                                            </div>
+                                            <div class="flex items-center">
+                                                <span class="text-xs text-purple-600 font-bold bg-purple-50 px-1.5 py-0.2 rounded-sm flex items-center gap-0.5">
+                                                    <i data-lucide="activity" class="w-3 h-3"></i> 無工時: ${noTimeCount} 次
+                                                </span>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+                                <div class="flex gap-1 print-hide">
+                                    <button onclick="setStaffOffDuty('${person.id}')" class="text-slate-400 hover:text-rose-600 p-1.5 hover:bg-white rounded transition" title="設為當日休假">
+                                        <i data-lucide="plane-takeoff" class="w-4 h-4"></i>
+                                    </button>
+                                </div>
+                            </div>
+                        `;
+
+                        // 主要負責拖曳區 (放寬放大家用字級)
+                        let primaryZoneHTML = `
+                            <div class="border border-dashed border-emerald-200 rounded-lg p-2.5 bg-emerald-50/10 transition-all duration-150"
+                                 data-shift="primary"
+                                 ondragover="dragOver(event)"
+                                 ondragleave="dragLeave(event)"
+                                 ondrop="dropToStaff(event, '${person.id}', 'primary')">
+                                <div class="text-xs font-bold text-emerald-600 mb-1.5 flex items-center gap-1">
+                                    <i data-lucide="key" class="w-3.5 h-3.5"></i> 🔑 主要負責
+                                </div>
+                                <div class="flex flex-wrap gap-1.5 min-h-[30px]">
+                        `;
+                        if (primaryAsgs.length === 0) {
+                            primaryZoneHTML += `<span class="text-xs text-slate-400 m-auto select-none pointer-events-none font-medium">尚未指定職責</span>`;
+                        } else {
+                            primaryAsgs.forEach(asg => {
+                                primaryZoneHTML += generateAssignmentBadge(person.id, asg);
+                            });
+                        }
+                        primaryZoneHTML += `</div></div>`;
+
+                        // 上午拖曳區
+                        let morningHTML = `
+                            <div class="border border-dashed border-sky-200 rounded-lg p-2.5 bg-sky-50/10 transition-all duration-150"
+                                 data-shift="morning"
+                                 ondragover="dragOver(event)"
+                                 ondragleave="dragLeave(event)"
+                                 ondrop="dropToStaff(event, '${person.id}', 'morning')">
+                                <div class="text-xs font-bold text-sky-600 mb-1.5 flex items-center gap-1">
+                                    <i data-lucide="sun" class="w-3.5 h-3.5"></i> ☀️ 上午派工
+                                </div>
+                                <div class="flex flex-wrap gap-1.5 min-h-[30px]">
+                        `;
+                        if (morningAsgs.length === 0) {
+                            morningHTML += `<span class="text-xs text-slate-400 m-auto select-none pointer-events-none font-medium">暫無指派</span>`;
+                        } else {
+                            morningAsgs.forEach(asg => {
+                                morningHTML += generateAssignmentBadge(person.id, asg);
+                            });
+                        }
+                        morningHTML += `</div></div>`;
+
+                        // 下午拖曳區
+                        let afternoonHTML = `
+                            <div class="border border-dashed border-indigo-200 rounded-lg p-2.5 bg-indigo-50/10 transition-all duration-150"
+                                 data-shift="afternoon"
+                                 ondragover="dragOver(event)"
+                                 ondragleave="dragLeave(event)"
+                                 ondrop="dropToStaff(event, '${person.id}', 'afternoon')">
+                                <div class="text-xs font-bold text-indigo-600 mb-1.5 flex items-center gap-1">
+                                    <i data-lucide="moon" class="w-3.5 h-3.5"></i> 🌙 下午派工
+                                </div>
+                                <div class="flex flex-wrap gap-1.5 min-h-[30px]">
+                        `;
+                        if (afternoonAsgs.length === 0) {
+                            afternoonHTML += `<span class="text-xs text-slate-400 m-auto select-none pointer-events-none font-medium">暫無指派</span>`;
+                        } else {
+                            afternoonAsgs.forEach(asg => {
+                                afternoonHTML += generateAssignmentBadge(person.id, asg);
+                            });
+                        }
+                        afternoonHTML += `</div></div>`;
+
+                        // 下班前拖曳區
+                        let closingHTML = `
+                            <div class="border border-dashed border-fuchsia-200 rounded-lg p-2.5 bg-fuchsia-50/10 transition-all duration-150"
+                                 data-shift="closing"
+                                 ondragover="dragOver(event)"
+                                 ondragleave="dragLeave(event)"
+                                 ondrop="dropToStaff(event, '${person.id}', 'closing')">
+                                <div class="text-xs font-bold text-fuchsia-600 mb-1.5 flex items-center gap-1">
+                                    <i data-lucide="sunset" class="w-3.5 h-3.5"></i> 🌆 下班前派工
+                                </div>
+                                <div class="flex flex-wrap gap-1.5 min-h-[30px]">
+                        `;
+                        if (closingAsgs.length === 0) {
+                            closingHTML += `<span class="text-xs text-slate-400 m-auto select-none pointer-events-none font-medium">暫無指派</span>`;
+                        } else {
+                            closingAsgs.forEach(asg => {
+                                closingHTML += generateAssignmentBadge(person.id, asg);
+                            });
+                        }
+                        closingHTML += `</div></div>`;
+
+                        card.innerHTML = headerHTML + primaryZoneHTML + morningHTML + afternoonHTML + closingHTML;
+                        staffList.appendChild(card);
+                    });
+                }
+            }
+
+            // 4. 渲染第 2 欄至第 6 欄拖曳工作項目
+            renderSourceColumn('roles', 'roles-list', 'border-l-4 border-l-emerald-500');
+            renderSourceColumn('fixed', 'fixed-list', 'border-l-4 border-l-amber-500');
+            renderSourceColumn('flexible', 'flexible-list', 'border-l-4 border-l-rose-500');
+            renderSourceColumn('closingTasks', 'closingTasks-list', 'border-l-4 border-l-fuchsia-500');
+            renderSourceColumn('emergencyTasks', 'emergencyTasks-list', 'border-l-4 border-l-cyan-500');
+
+            // 重新載入圖標
+            lucide.createIcons();
+        }
+
+        // 縮小版工作欄位卡片生成 (僅顯示標題與時間)
+        function renderSourceColumn(type, containerId, borderClass) {
+            const container = document.getElementById(containerId);
+            if (!container) return; // 確保元素存在，預防 DOM 漏掉
+            
+            container.innerHTML = '';
+            
+            const list = appData[type] || [];
+            if (list.length === 0) {
+                container.innerHTML = `<div class="text-center py-6 text-slate-400 text-xs border border-dashed border-slate-200 rounded-lg font-bold">已分派完畢</div>`;
+                return;
+            }
+
+            list.forEach(item => {
+                const card = document.createElement('div');
+                card.className = `bg-white border border-slate-200 ${borderClass} rounded-lg p-2.5 shadow-xs hover:shadow-md cursor-grab active:cursor-grabbing transition relative group`;
+                card.setAttribute('draggable', 'true');
+                card.setAttribute('data-id', item.id);
+                card.setAttribute('data-type', type);
+
+                card.addEventListener('dragstart', (e) => dragStart(e, item, type));
+                card.addEventListener('dragend', dragEnd);
+                card.addEventListener('click', () => openDetailModal(type, item.id));
+
+                let infoHTML = '';
+                if (type === 'fixed' && item.time) {
+                    infoHTML = `<span class="text-[11px] bg-amber-50 text-amber-700 px-1.5 py-0.5 rounded font-bold">${item.time}</span>`;
+                }
+
+                card.innerHTML = `
+                    <div class="flex items-center justify-between pr-3 gap-1 py-0.5">
+                        <h4 class="font-bold text-slate-700 text-sm truncate group-hover:text-blue-600 transition" title="${item.name}">${item.name}</h4>
+                        ${infoHTML}
+                    </div>
+                `;
+                container.appendChild(card);
+            });
+        }
+
+        // 輔助生成任務標籤 HTML 
+        function generateAssignmentBadge(personId, asg) {
+            if (!asg) return '';
+            let badgeBg = 'bg-slate-100 text-slate-700 border-slate-200';
+            if (asg.type === 'roles') badgeBg = 'bg-emerald-50 text-emerald-700 border-emerald-100';
+            if (asg.type === 'fixed') badgeBg = 'bg-amber-50 text-amber-700 border-amber-100';
+            if (asg.type === 'flexible') badgeBg = 'bg-rose-50 text-rose-700 border-rose-100';
+            if (asg.type === 'closingTasks') badgeBg = 'bg-fuchsia-50 text-fuchsia-700 border-fuchsia-100';
+            if (asg.type === 'emergencyTasks') badgeBg = 'bg-cyan-50 text-cyan-700 border-cyan-100';
+
+            const person = (appData.staff || []).find(s => s.id === personId);
+            if (!person) return '';
+            const globalIndex = (person.assignments || []).findIndex(a => a && a.originId === asg.originId && a.shift === asg.shift);
+
+            return `
+                <div class="flex items-center gap-1 px-3 py-1 text-xs font-extrabold rounded-md border ${badgeBg} cursor-pointer hover:shadow-xs hover:brightness-95 transition"
+                     onclick="openDetailFromAssignment('${personId}', ${globalIndex})">
+                    <span class="truncate max-w-[85px]">${asg.name}</span>
+                    ${asg.time ? `<span class="text-[10px] opacity-75 font-bold">(${asg.time})</span>` : ''}
+                    <!-- 唯讀模式下不顯示 X 移除按鈕 -->
+                    <button onclick="event.stopPropagation(); removeAssignment('${personId}', ${globalIndex})" class="manager-only text-slate-400 hover:text-red-500 ml-0.5 transition">
+                        <i data-lucide="x" class="w-3 h-3"></i>
+                    </button>
+                </div>
+            `;
+        }
+
+        // 渲染休假人員名單 (放大字體)
+        function renderOffDutyList() {
+            const offList = document.getElementById('off-duty-list');
+            if (!offList) return;
+            offList.innerHTML = '';
+
+            const list = appData.offDuty || [];
+            if (list.length === 0) {
+                offList.innerHTML = `
+                    <div class="text-center py-4 text-slate-400 text-xs border border-dashed border-slate-100 rounded-xl">
+                        今日無人休假
+                    </div>
+                `;
+                return;
+            }
+
+            list.forEach(person => {
+                const item = document.createElement('div');
+                item.className = 'flex items-center justify-between bg-rose-50/40 border border-rose-100 rounded-lg p-2.5 hover:bg-rose-50/70 transition';
+                
+                // 唯讀模式下隱藏銷假出勤按鈕
+                let buttonHTML = isViewerMode ? '' : `
+                    <button onclick="setStaffActive('${person.id}')" class="flex items-center gap-0.5 px-2.5 py-1 bg-white hover:bg-emerald-50 border border-slate-200 hover:border-emerald-200 text-slate-600 hover:text-emerald-700 rounded-md text-xs font-bold transition shadow-xs">
+                        <i data-lucide="user-check" class="w-3 h-3"></i>
+                        出勤
+                    </button>
+                `;
+
+                item.innerHTML = `
+                    <div class="flex items-center gap-2">
+                        <div class="w-7 h-7 rounded-full bg-rose-100 text-rose-600 font-bold text-xs flex items-center justify-center">
+                            ${person.name.charAt(0)}
+                        </div>
+                        <div>
+                            <span class="font-extrabold text-slate-700 text-sm">${person.name}</span>
+                        </div>
+                    </div>
+                    ${buttonHTML}
+                `;
+                offList.appendChild(item);
+            });
+        }
+
+        // 渲染「今日出勤與派工總表」的表格內容 (放大總表與標籤)
+        function renderSummaryTable() {
+            const tbody = document.getElementById('summary-table-body');
+            if (!tbody) return;
+            tbody.innerHTML = '';
+
+            const activeList = appData.staff || [];
+            if (activeList.length === 0) {
+                tbody.innerHTML = `
+                    <tr>
+                        <td colspan="8" class="py-12 text-center text-slate-400 italic text-base">
+                            目前無出勤人員。請在右側名單中將人員設為「出勤」。
+                        </td>
+                    </tr>
+                `;
+                return;
+            }
+
+            activeList.forEach(person => {
+                const currentAsgs = person.assignments || [];
+                const primaryAsgs = currentAsgs.filter(a => a && a.shift === 'primary');
+                const morningAsgs = currentAsgs.filter(a => a && a.shift === 'morning');
+                const afternoonAsgs = currentAsgs.filter(a => a && a.shift === 'afternoon');
+                const closingAsgs = currentAsgs.filter(a => a && a.shift === 'closing');
+
+                // 🎯 精確加總工時：上下午（晨間+午間）工時 / 下班前工時 / 無預設時間任務次數
+                const morningHalfTime = calculateTotalHours(currentAsgs.filter(a => a && (a.shift === 'morning' || a.shift === 'afternoon')));
+                const closingHalfTime = calculateTotalHours(currentAsgs.filter(a => a && a.shift === 'closing'));
+                const noTimeCount = countNoTimeTasks(currentAsgs);
+
+                // 🔑 主要負責 (字體放大)
+                let primaryHTML = '';
+                if (primaryAsgs.length === 0) {
+                    primaryHTML = `<span class="text-slate-400 text-xs italic">-</span>`;
+                } else {
+                    primaryHTML = primaryAsgs.map((a, idx) => {
+                        const globalIndex = currentAsgs.findIndex(g => g && g.originId === a.originId && g.shift === 'primary');
+                        return `
+                            <span class="inline-block bg-emerald-50 text-emerald-700 border border-emerald-100 text-xs font-black px-2.5 py-1 rounded-md mr-1 mb-1 shadow-2xs cursor-pointer hover:scale-105 transition-transform"
+                                  onclick="openDetailFromAssignment('${person.id}', ${globalIndex})">
+                                ${a.name}
+                            </span>
+                        `;
+                    }).join('');
+                }
+
+                // ☀️ 上午工作 (字體與內距放大)
+                let morningHTML = '';
+                if (morningAsgs.length === 0) {
+                    morningHTML = `<span class="text-slate-400 text-xs italic">-</span>`;
+                } else {
+                    morningHTML = morningAsgs.map(a => {
+                        let style = 'bg-slate-100 text-slate-700 border-slate-200';
+                        if (a.type === 'fixed') style = 'bg-amber-50 text-amber-700 border-amber-100';
+                        if (a.type === 'flexible') style = 'bg-rose-50 text-rose-700 border-rose-100';
+                        if (a.type === 'closingTasks') style = 'bg-fuchsia-50 text-fuchsia-700 border-fuchsia-100';
+                        if (a.type === 'emergencyTasks') style = 'bg-cyan-50 text-cyan-700 border-cyan-100';
+                        
+                        const globalIndex = currentAsgs.findIndex(g => g && g.originId === a.originId && g.shift === 'morning');
+                        return `
+                            <span class="inline-block ${style} border text-xs font-black px-2.5 py-1 rounded-md mr-1 mb-1 cursor-pointer hover:scale-105 transition-transform"
+                                  onclick="openDetailFromAssignment('${person.id}', ${globalIndex})">
+                                ${a.name} ${a.time ? `<span class="text-[10px] opacity-80 font-extrabold">(${a.time})</span>` : ''}
+                            </span>
+                        `;
+                    }).join('');
+                }
+
+                // 🌙 下午工作
+                let afternoonHTML = '';
+                if (afternoonAsgs.length === 0) {
+                    afternoonHTML = `<span class="text-slate-400 text-xs italic">-</span>`;
+                } else {
+                    afternoonHTML = afternoonAsgs.map(a => {
+                        let style = 'bg-slate-100 text-slate-700 border-slate-200';
+                        if (a.type === 'fixed') style = 'bg-amber-50 text-amber-700 border-amber-100';
+                        if (a.type === 'flexible') style = 'bg-rose-50 text-rose-700 border-rose-100';
+                        if (a.type === 'closingTasks') style = 'bg-fuchsia-50 text-fuchsia-700 border-fuchsia-100';
+                        if (a.type === 'emergencyTasks') style = 'bg-cyan-50 text-cyan-700 border-cyan-100';
+                        
+                        const globalIndex = currentAsgs.findIndex(g => g && g.originId === a.originId && g.shift === 'afternoon');
+                        return `
+                            <span class="inline-block ${style} border text-xs font-black px-2.5 py-1 rounded-md mr-1 mb-1 cursor-pointer hover:scale-105 transition-transform"
+                                  onclick="openDetailFromAssignment('${person.id}', ${globalIndex})">
+                                ${a.name} ${a.time ? `<span class="text-[10px] opacity-80 font-extrabold">(${a.time})</span>` : ''}
+                            </span>
+                        `;
+                    }).join('');
+                }
+
+                // 🌆 下班前工作
+                let closingHTML = '';
+                if (closingAsgs.length === 0) {
+                    closingHTML = `<span class="text-slate-400 text-xs italic">-</span>`;
+                } else {
+                    closingHTML = closingAsgs.map(a => {
+                        let style = 'bg-slate-100 text-slate-700 border-slate-200';
+                        if (a.type === 'fixed') style = 'bg-amber-50 text-amber-700 border-amber-100';
+                        if (a.type === 'flexible') style = 'bg-rose-50 text-rose-700 border-rose-100';
+                        if (a.type === 'closingTasks') style = 'bg-fuchsia-50 text-fuchsia-700 border-fuchsia-100';
+                        if (a.type === 'emergencyTasks') style = 'bg-cyan-50 text-cyan-700 border-cyan-100';
+                        
+                        const globalIndex = currentAsgs.findIndex(g => g && g.originId === a.originId && g.shift === 'closing');
+                        return `
+                            <span class="inline-block ${style} border text-xs font-black px-2.5 py-1 rounded-md mr-1 mb-1 cursor-pointer hover:scale-105 transition-transform"
+                                  onclick="openDetailFromAssignment('${person.id}', ${globalIndex})">
+                                ${a.name} ${a.time ? `<span class="text-[10px] opacity-80 font-extrabold">(${a.time})</span>` : ''}
+                            </span>
+                        `;
+                    }).join('');
+                }
+
+                const tr = document.createElement('tr');
+                tr.className = 'hover:bg-slate-50 transition-colors border-b border-slate-150';
+                tr.innerHTML = `
+                    <td class="py-4 px-2 font-extrabold text-slate-900 flex items-center gap-1 text-sm md:text-base">
+                        <div class="w-6 h-6 rounded-full bg-indigo-100 text-indigo-700 font-bold text-xs flex items-center justify-center">
+                            ${person.name.charAt(0)}
+                        </div>
+                        <span class="truncate">${person.name}</span>
+                    </td>
+                    <td class="py-4 px-2">${primaryHTML}</td>
+                    <td class="py-4 px-2">${morningHTML}</td>
+                    <td class="py-4 px-2">${afternoonHTML}</td>
+                    <td class="py-4 px-2">${closingHTML}</td>
+                    <!-- ☀️🌙 上下午工時合併統計 (字體放大) -->
+                    <td class="py-4 px-2 text-right font-black text-blue-600 bg-blue-50/20 text-sm md:text-base">
+                        ${morningHalfTime} 小時
+                    </td>
+                    <!-- 🌆 下班前工時統計 (字體放大) -->
+                    <td class="py-4 px-2 text-right font-black text-fuchsia-600 bg-fuchsia-50/20 text-sm md:text-base">
+                        ${closingHalfTime} 小時
+                    </td>
+                    <!-- 📊 無時間限制任務派工次數 (字體放大) -->
+                    <td class="py-4 px-2 text-right font-black text-indigo-700 bg-indigo-50/20 text-sm md:text-base">
+                        ${noTimeCount} 次
+                    </td>
+                `;
+                tbody.appendChild(tr);
+            });
+        }
+
+        // ==================== 📸 HTML2Canvas 匯出圖檔邏輯 ====================
+        function exportToImage() {
+            const target = document.getElementById('export-target-area');
+            if (!target) return;
+            
+            showToast('正在生成高畫質圖檔，請稍候...', 'loader', 'text-blue-500');
+
+            html2canvas(target, {
+                scale: 2.5, 
+                useCORS: true, 
+                backgroundColor: '#ffffff', 
+                logging: false,
+                onclone: (clonedDoc) => {
+                    const actionBtn = clonedDoc.querySelector('button[onclick="exportToImage()"]');
+                    if (actionBtn) actionBtn.style.display = 'none';
+
+                    const addHolidayBtn = clonedDoc.querySelector('button[onclick="openAddModal(\'offduty\')"]');
+                    if (addHolidayBtn) addHolidayBtn.style.display = 'none';
+                    
+                    const activeBtns = clonedDoc.querySelectorAll('button[onclick^="setStaffActive"]');
+                    activeBtns.forEach(btn => btn.style.display = 'none');
+                }
+            }).then(canvas => {
+                const image = canvas.toDataURL("image/png");
+                
+                const dateEl = document.getElementById('dispatch-date');
+                const selectedDate = dateEl ? dateEl.value : '';
+                const formattedDate = selectedDate ? selectedDate.replace(/-/g, '') : 'EXPORT';
+                
+                const link = document.createElement('a');
+                link.download = `預派現場派工總表_${formattedDate}.png`;
+                link.href = image;
+                link.click();
+                
+                showToast('圖檔匯出成功！已自動下載。', 'check', 'text-emerald-500');
+            }).catch(err => {
+                console.error(err);
+                showToast('圖檔匯出失敗，請重試。', 'x', 'text-red-500');
+            });
+        }
+
+        // ==================== 拖曳與邏輯控制 ====================
+        function dragStart(e, item, type) {
+            if (isViewerMode) return;
+            draggedItemData = item;
+            draggedItemType = type;
+            e.currentTarget.classList.add('dragging');
+            e.dataTransfer.setData('text/plain', item.id);
+            e.dataTransfer.effectAllowed = 'copy';
+        }
+
+        function dragEnd(e) {
+            e.currentTarget.classList.remove('dragging');
+        }
+
+        // 防禦觸發
+        function dragOver(e) {
+            if (isViewerMode) return;
+            e.preventDefault();
+            const zone = e.currentTarget;
+            zone.classList.add('bg-slate-200/50', 'border-blue-400');
+        }
+
+        function dragLeave(e) {
+            const zone = e.currentTarget;
+            zone.classList.remove('bg-slate-200/50', 'border-blue-400');
+        }
+
+        // 放下至特定人員方塊 (含分流邏輯)
+        function dropToStaff(e, staffId, shift) {
+            e.preventDefault();
+            const zone = e.currentTarget;
+            zone.classList.remove('bg-slate-200/50', 'border-blue-400');
+
+            if (isViewerMode) return;
+            if (!draggedItemData || !draggedItemType) return;
+
+            // 🛑 驗證 1: 「主要負責」欄位只能放入 Column 2 (roles) 項目
+            if (shift === 'primary' && draggedItemType !== 'roles') {
+                showToast("「主要負責」專區只能指派主要負責項目！", "alert-circle", "text-amber-500");
+                return;
+            }
+
+            // 🛑 驗證 2: 上下午、下班前派工只能指派任務卡片
+            if ((shift === 'morning' || shift === 'afternoon' || shift === 'closing') && draggedItemType === 'roles') {
+                showToast("主要負責項目請拖曳至最上方的「🔑 主要負責」專區！", "alert-circle", "text-amber-550");
+                return;
+            }
+
+            // 🛑 驗證 3: 「5. 下班前工作」僅可拖曳至「下班前派工區」
+            if (draggedItemType === 'closingTasks' && shift !== 'closing') {
+                showToast("此為下班前任務，限拖曳至最下方的「下班前派工」時段！", "alert-circle", "text-fuchsia-500");
+                return;
+            }
+
+            const activeList = appData.staff || [];
+            const staffIndex = activeList.findIndex(s => s.id === staffId);
+            if (staffIndex === -1) return;
+
+            // 檢查在該時段是否重複指派相同的卡片
+            const personAsgs = activeList[staffIndex].assignments || [];
+            const isDuplicate = personAsgs.some(
+                asg => asg && asg.originId === draggedItemData.id && asg.type === draggedItemType && asg.shift === shift
+            );
+
+            if (isDuplicate) {
+                let shiftText = "主要負責";
+                if (shift === 'morning') shiftText = "上午";
+                if (shift === 'afternoon') shiftText = "下午";
+                if (shift === 'closing') shiftText = "下班前";
+                showToast(`該人員在 ${shiftText} 已指派過「${draggedItemData.name}」`, 'alert-circle', 'text-amber-500');
+                return;
+            }
+
+            const assignment = {
+                originId: draggedItemData.id,
+                type: draggedItemType,
+                name: draggedItemData.name,
+                note: draggedItemData.note || '',
+                shift: shift,
+                time: draggedItemType === 'fixed' ? (draggedItemData.time || '1個小時') : null,
+                originalTime: draggedItemType === 'fixed' ? (draggedItemData.time || '1個小時') : null // 💡 記錄原始未減半的時間
+            };
+
+            if (!activeList[staffIndex].assignments) {
+                activeList[staffIndex].assignments = [];
+            }
+            activeList[staffIndex].assignments.push(assignment);
+            
+            // 💡 拖曳成功後，將其從來源欄位 (appData[type]) 暫時移除 (完成「清空」的效果)
+            if (draggedItemType !== 'emergencyTasks') { 
+                appData[draggedItemType] = appData[draggedItemType].filter(item => item.id !== draggedItemData.id);
+            }
+            
+            saveData();
+            renderBoard();
+            
+            let shiftTitle = "主要負責";
+            if (shift === 'morning') shiftTitle = "上午";
+            if (shift === 'afternoon') shiftTitle = "下午";
+            if (shift === 'closing') shiftTitle = "下班前";
+            showToast(`已指派 ${activeList[staffIndex].name} 的 ${shiftTitle} 為「${assignment.name}」`, 'check', 'text-emerald-500');
+
+            draggedItemData = null;
+            draggedItemType = null;
+        }
+
+        // 💡 優化：移除任務時，依照當前共同分攤同仁的指派狀態，動態平衡並完美恢復工時
+        function removeAssignment(staffId, index) {
+            if (isViewerMode) return;
+            const activeList = appData.staff || [];
+            const staffIndex = activeList.findIndex(s => s.id === staffId);
+            if (staffIndex === -1) return;
+            
+            const personAsgs = activeList[staffIndex].assignments || [];
+            const removed = personAsgs.splice(index, 1)[0];
+            activeList[staffIndex].assignments = personAsgs;
+
+            // 💡 當移除指派時，需要將該範本工作卡片放回原本對應的 2~5 欄中，避免徹底不見
+            if (removed && removed.type !== 'emergencyTasks') {
+                if (removed.type === 'fixed') {
+                    // 1. 計算其他所有人身上該任務的累計剩餘工時
+                    let sumOfOthers = 0;
+                    activeList.forEach(p => {
+                        (p.assignments || []).forEach(asg => {
+                            if (asg && asg.originId === removed.originId) {
+                                const match = asg.time ? asg.time.match(/(\d+(\.\d+)?)/) : null;
+                                if (match) {
+                                    sumOfOthers += parseFloat(match[1]);
+                                }
+                            }
+                        });
+                    });
+
+                    // 2. 取得此任務的原始總工時基準
+                    const origMatch = removed.originalTime ? removed.originalTime.match(/(\d+(\.\d+)?)/) : null;
+                    const originalVal = origMatch ? parseFloat(origMatch[1]) : 1.0;
+
+                    // 3. 計算本次應該歸還給看板的賸餘工時
+                    const remVal = Math.round((originalVal - sumOfOthers) * 100) / 100;
+
+                    // 4. 更新或放回看板
+                    if (remVal > 0) {
+                        const templateExists = appData.fixed.find(item => item.id === removed.originId);
+                        // 根據 remVal 組合出新的時間文字
+                        let newTimeText = removed.originalTime || "1個小時";
+                        if (origMatch && removed.originalTime) {
+                            newTimeText = removed.originalTime.replace(origMatch[1], remVal);
+                        } else {
+                            newTimeText = `${remVal}個小時`;
+                        }
+
+                        if (templateExists) {
+                            // 如果看板上已有卡片，更新它的時間（工時回歸）
+                            templateExists.time = newTimeText;
+                        } else {
+                            // 如果看板上沒有，放回卡片
+                            appData.fixed.push({
+                                id: removed.originId,
+                                name: removed.name,
+                                note: removed.note || '',
+                                time: newTimeText,
+                                originalTime: removed.originalTime || removed.time
+                            });
+                        }
+                    }
+                } else {
+                    // 非固定工作（無工時加總與折半問題），直接放回
+                    const templateExists = appData[removed.type].some(item => item.id === removed.originId);
+                    if (!templateExists) {
+                        appData[removed.type].push({
+                            id: removed.originId,
+                            name: removed.name,
+                            note: removed.note || '',
+                            time: removed.time
+                        });
+                    }
+                }
+            }
+
+            saveData();
+            renderBoard();
+            if (removed) {
+                showToast(`已取消「${removed.name}」任務，看板與工時已自動平衡重算`, 'x', 'text-slate-500');
+            }
+        }
+
+
+        // ==================== 彈出視窗：詳情與編輯邏輯 ====================
+        function openDetailModal(type, id) {
+            if (type === 'staff') return;
+
+            const list = appData[type] || [];
+            const item = list.find(i => i.id === id);
+            if (!item) return;
+
+            document.getElementById('edit-item-type').value = type;
+            document.getElementById('edit-item-id').value = id;
+            
+            const nameField = document.getElementById('edit-item-name');
+            const noteField = document.getElementById('edit-item-note');
+            
+            if (nameField) {
+                nameField.value = item.name;
+                nameField.disabled = isViewerMode; // 唯讀模式下鎖定編輯
+            }
+            if (noteField) {
+                noteField.value = item.note || '';
+                noteField.disabled = isViewerMode; // 唯讀模式下鎖定編輯
+            }
+
+            const timeContainer = document.getElementById('edit-time-container');
+            const timeInput = document.getElementById('edit-item-time');
+            if (type === 'fixed') {
+                if (timeContainer) timeContainer.style.display = 'block';
+                if (timeInput) {
+                    timeInput.value = item.time || '1個小時';
+                    timeInput.disabled = isViewerMode;
+                }
+            } else {
+                if (timeContainer) timeContainer.style.display = 'none';
+                if (timeInput) timeInput.value = '';
+            }
+
+            // 原始範本卡片不顯示共同分擔拆分區
+            const splitContainer = document.getElementById('split-task-container');
+            if (splitContainer) splitContainer.classList.add('hidden');
+
+            const iconContainer = document.getElementById('modal-icon-container');
+            const modalIcon = document.getElementById('modal-icon');
+            if (iconContainer) iconContainer.className = 'p-1.5 rounded-lg text-white';
+
+            if (iconContainer && modalIcon) {
+                if (type === 'roles') {
+                    iconContainer.classList.add('bg-emerald-600');
+                    modalIcon.setAttribute('data-lucide', 'shield');
+                } else if (type === 'fixed') {
+                    iconContainer.classList.add('bg-amber-600');
+                    modalIcon.setAttribute('data-lucide', 'calendar');
+                } else if (type === 'flexible') {
+                    iconContainer.classList.add('bg-rose-600');
+                    modalIcon.setAttribute('data-lucide', 'activity');
+                } else if (type === 'closingTasks') {
+                    iconContainer.classList.add('bg-fuchsia-600');
+                    modalIcon.setAttribute('data-lucide', 'sunset');
+                } else if (type === 'emergencyTasks') {
+                    iconContainer.classList.add('bg-cyan-600');
+                    modalIcon.setAttribute('data-lucide', 'zap');
+                }
+            }
+
+            // 唯讀模式下隱藏刪除、儲存、複製按鈕
+            const deleteBtn = document.getElementById('detail-delete-btn');
+            const saveBtn = document.getElementById('detail-save-btn');
+            const dupBtn = document.getElementById('detail-duplicate-btn');
+            if (deleteBtn) {
+                if (isViewerMode) deleteBtn.classList.add('hidden');
+                else deleteBtn.classList.remove('hidden');
+            }
+            if (saveBtn) {
+                if (isViewerMode) saveBtn.classList.add('hidden');
+                else saveBtn.classList.remove('hidden');
+            }
+            if (dupBtn) {
+                if (isViewerMode) dupBtn.classList.add('hidden');
+                else dupBtn.classList.remove('hidden');
+            }
+
+            lucide.createIcons();
+            const modal = document.getElementById('detail-modal');
+            if (modal) modal.classList.remove('hidden');
+        }
+
+        function openDetailFromAssignment(staffId, assignmentIndex) {
+            const activeList = appData.staff || [];
+            const person = activeList.find(s => s.id === staffId);
+            if (!person) return;
+            
+            const asg = (person.assignments || [])[assignmentIndex];
+            if (!asg) return;
+
+            // 💡 共同分擔：設定當前正被編輯的在勤人員與指派索引
+            activeStaffId = staffId;
+            activeAssignmentIndex = assignmentIndex;
+
+            // 進入編輯/查看詳情
+            openDetailModalDirectly(asg);
+        }
+
+        // 當工作已在人員身上時，直接開啟並編輯指派的任務詳情
+        function openDetailModalDirectly(assignment) {
+            document.getElementById('edit-item-type').value = "assigned_task";
+            document.getElementById('edit-item-id').value = assignment.originId;
+            
+            const nameField = document.getElementById('edit-item-name');
+            const noteField = document.getElementById('edit-item-note');
+            
+            if (nameField) {
+                nameField.value = assignment.name;
+                nameField.disabled = isViewerMode;
+            }
+            if (noteField) {
+                noteField.value = assignment.note || '';
+                noteField.disabled = isViewerMode;
+            }
+
+            const timeContainer = document.getElementById('edit-time-container');
+            const timeInput = document.getElementById('edit-item-time');
+            if (assignment.type === 'fixed') {
+                if (timeContainer) timeContainer.style.display = 'block';
+                if (timeInput) {
+                    timeInput.value = assignment.time || '1個小時';
+                    timeInput.disabled = isViewerMode;
+                }
+            } else {
+                if (timeContainer) timeContainer.style.display = 'none';
+                if (timeInput) timeInput.value = '';
+            }
+
+            // 👥 已指派任務點開時：開啟並填充共同分擔下拉選單 (排除自己)
+            const splitContainer = document.getElementById('split-task-container');
+            const selectEl = document.getElementById('split-staff-select');
+            
+            if (splitContainer) {
+                // 唯讀模式下亦隱藏共同分擔按鈕
+                if (isViewerMode) splitContainer.classList.add('hidden');
+                else splitContainer.classList.remove('hidden');
+            }
+
+            if (selectEl) {
+                selectEl.innerHTML = '<option value="">選擇共同分擔的人員...</option>';
+                const activeList = appData.staff || [];
+                activeList.forEach(p => {
+                    if (p.id !== activeStaffId) {
+                        selectEl.innerHTML += `<option value="${p.id}">${p.name}</option>`;
+                    }
+                });
+            }
+
+            const iconContainer = document.getElementById('modal-icon-container');
+            const modalIcon = document.getElementById('modal-icon');
+            if (iconContainer) iconContainer.className = 'p-1.5 rounded-lg text-white bg-blue-600';
+            if (modalIcon) modalIcon.setAttribute('data-lucide', 'file-text');
+
+            // 唯讀模式下隱藏刪除、儲存、複製按鈕
+            const deleteBtn = document.getElementById('detail-delete-btn');
+            const saveBtn = document.getElementById('detail-save-btn');
+            const dupBtn = document.getElementById('detail-duplicate-btn');
+            if (deleteBtn) {
+                if (isViewerMode) deleteBtn.classList.add('hidden');
+                else deleteBtn.classList.remove('hidden');
+            }
+            if (saveBtn) {
+                if (isViewerMode) saveBtn.classList.add('hidden');
+                else saveBtn.classList.remove('hidden');
+            }
+            if (dupBtn) {
+                if (isViewerMode) dupBtn.classList.add('hidden');
+                else dupBtn.classList.remove('hidden');
+            }
+
+            lucide.createIcons();
+            const modal = document.getElementById('detail-modal');
+            if (modal) modal.classList.remove('hidden');
+        }
+
+        // 👥 共同分擔：將工時文字折半的核心解析演算法
+        function halveTimeText(timeStr) {
+            if (!timeStr) return null;
+            // 比對浮點數或整數
+            const match = timeStr.match(/(\d+(\.\d+)?)/);
+            if (match) {
+                const originalNum = parseFloat(match[1]);
+                // 將時長除以 2，四捨五入至小數點第二位
+                const halvedNum = Math.round((originalNum / 2) * 100) / 100;
+                return timeStr.replace(match[1], halvedNum);
+            }
+            return timeStr;
+        }
+
+        // 👥 共同分擔：執行拆分與工時折半指派邏輯
+        function splitAssignedTask() {
+            if (isViewerMode) return;
+
+            const selectEl = document.getElementById('split-staff-select');
+            const targetStaffId = selectEl ? selectEl.value : '';
+
+            if (!targetStaffId) {
+                showToast("請選擇一位要共同分擔的在勤同仁！", "alert-circle", "text-amber-500");
+                return;
+            }
+
+            const activeList = appData.staff || [];
+            
+            // 1. 取得當前指派同仁與工作
+            const currentStaff = activeList.find(s => s.id === activeStaffId);
+            if (!currentStaff || !currentStaff.assignments) return;
+
+            const asg = currentStaff.assignments[activeAssignmentIndex];
+            if (!asg) return;
+
+            // 2. 取得目標分擔同仁
+            const targetStaff = activeList.find(s => s.id === targetStaffId);
+            if (!targetStaff) return;
+
+            // 檢查目標同仁身上是否已經指派了相同的任務
+            const isDuplicate = (targetStaff.assignments || []).some(
+                a => a && a.originId === asg.originId && a.shift === asg.shift
+            );
+
+            if (isDuplicate) {
+                showToast(`${targetStaff.name} 的時段中已經指派了該工作！`, "alert-circle", "text-amber-500");
+                return;
+            }
+
+            // 3. 工時折半計算
+            if (asg.time) {
+                const halvedTime = halveTimeText(asg.time);
+                asg.time = halvedTime; // 當前同仁的工時減半
+            }
+
+            // 4. 在目標同仁身上指派一份一模一樣、工時亦折半的深拷貝副本
+            const targetAssignment = JSON.parse(JSON.stringify(asg));
+            if (!targetStaff.assignments) targetStaff.assignments = [];
+            targetStaff.assignments.push(targetAssignment);
+
+            // 儲存、渲染與關閉
+            saveData();
+            renderBoard();
+            closeDetailModal();
+            showToast(`🎉 已將「${asg.name}」分拆給 ${currentStaff.name} 與 ${targetStaff.name} 共同承擔，工時已自動折半！`, "users", "text-emerald-500");
+        }
+
+        function closeDetailModal() {
+            const modal = document.getElementById('detail-modal');
+            if (modal) modal.classList.add('hidden');
+            // 清除指派追蹤狀態
+            activeStaffId = null;
+            activeAssignmentIndex = null;
+        }
+
+        function saveItemDetails() {
+            if (isViewerMode) return;
+
+            const type = document.getElementById('edit-item-type').value;
+            const id = document.getElementById('edit-item-id').value;
+            const nameInput = document.getElementById('edit-item-name');
+            const newName = nameInput ? nameInput.value.trim() : '';
+            const noteInput = document.getElementById('edit-item-note');
+            const newNote = noteInput ? noteInput.value : '';
+            const timeInput = document.getElementById('edit-item-time');
+            const newTime = timeInput ? timeInput.value.trim() : '';
+
+            if (!newName) {
+                alert('名稱不能為空！');
+                return;
+            }
+
+            if (type === "assigned_task") {
+                // 編輯已指派中工作的細項同步
+                const activeList = appData.staff || [];
+                activeList.forEach(person => {
+                    (person.assignments || []).forEach(asg => {
+                        if (asg && asg.originId === id) {
+                            asg.name = newName;
+                            asg.note = newNote;
+                            if (asg.type === 'fixed') {
+                                asg.time = newTime;
+                                asg.originalTime = newTime; // 💡 同步更新原始時間基準
+                            }
+                        }
+                    });
+                });
+            } else {
+                // 編輯尚未被指派、還在下方看板中的工作項目
+                const list = appData[type] || [];
+                const itemIndex = list.findIndex(i => i.id === id);
+                if (itemIndex !== -1) {
+                    list[itemIndex].name = newName;
+                    list[itemIndex].note = newNote;
+                    if (type === 'fixed') {
+                        list[itemIndex].time = newTime;
+                    }
+                    appData[type] = list;
+                }
+            }
+
+            saveData();
+            renderBoard();
+            closeDetailModal();
+            showToast(`已成功修改「${newName}」內容`, 'edit-3', 'text-blue-500');
+        }
+
+        // 複製卡片範本功能的實作
+        function duplicateItemFromModal() {
+            if (isViewerMode) return;
+
+            const type = document.getElementById('edit-item-type').value;
+            const id = document.getElementById('edit-item-id').value;
+
+            // 如是正處於指派狀態的任務副本，直接不允許複製範本
+            if (type === "assigned_task") {
+                showToast("請直接在下方的工作列表看板中複製卡片範本！", "alert-circle", "text-amber-500");
+                return;
+            }
+            
+            const list = appData[type] || [];
+            const item = list.find(i => i.id === id);
+            if (!item) return;
+
+            // 建立具有全新獨特ID的副本
+            const newId = `${type === 'offduty' ? 'staff' : type}-${Date.now()}`;
+            const newObj = {
+                id: newId,
+                name: `${item.name} - 複製`,
+                note: item.note || ''
+            };
+
+            if (type === 'staff') {
+                newObj.assignments = [];
+                if (!appData.staff) appData.staff = [];
+                appData.staff.push(newObj);
+            } else if (type === 'offduty') {
+                if (!appData.offDuty) appData.offDuty = [];
+                appData.offDuty.push({ id: newId, name: `${item.name} - 複製`, assignments: [] });
+            } else {
+                if (type === 'fixed') {
+                    newObj.time = item.time || '1個小時';
+                }
+                if (!appData[type]) {
+                    appData[type] = [];
+                }
+                appData[type].push(newObj);
+            }
+
+            saveData();
+            renderBoard();
+            closeDetailModal();
+            showToast(`已成功複製並新增「${newObj.name}」！`, 'copy', 'text-emerald-500');
+        }
+
+        function deleteItemFromModal() {
+            if (isViewerMode) return;
+
+            const type = document.getElementById('edit-item-type').value;
+            const id = document.getElementById('edit-item-id').value;
+            
+            openConfirmModal(
+                '確定永久刪除此卡片？', 
+                '這會將此工作卡片從系統中永久移除，所有人員身上對應的任務也將一併移出且無法復原！', 
+                () => {
+                    deleteGeneralItem(type, id);
+                    closeDetailModal();
+                }
+            );
+        }
+
+        function deleteGeneralItem(type, id) {
+            if (isViewerMode) return;
+
+            if (type === 'offduty') {
+                appData.offDuty = (appData.offDuty || []).filter(i => i.id !== id);
+            } else if (type === 'assigned_task') {
+                const activeList = appData.staff || [];
+                activeList.forEach(person => {
+                    person.assignments = (person.assignments || []).filter(asg => asg && asg.originId !== id);
+                });
+            } else {
+                appData[type] = (appData[type] || []).filter(i => i.id !== id);
+                if (type !== 'staff') {
+                    const activeList = appData.staff || [];
+                    activeList.forEach(person => {
+                        person.assignments = (person.assignments || []).filter(asg => asg && !(asg.originId === id && asg.type === type));
+                    });
+                }
+            }
+
+            saveData();
+            renderBoard();
+            showToast('已成功移除該卡片與連動派工', 'trash', 'text-red-500');
+        }
+
+
+        // ==================== 新增項目彈窗邏輯 ====================
+        function openAddModal(type) {
+            if (isViewerMode) return;
+
+            const addType = document.getElementById('add-item-type');
+            const addName = document.getElementById('add-item-name');
+            const addNote = document.getElementById('add-item-note');
+            const addTime = document.getElementById('add-item-time');
+
+            if (addType) addType.value = type;
+            if (addName) addName.value = '';
+            if (addNote) addNote.value = '';
+            if (addTime) addTime.value = '1個小時';
+
+            const nameLabel = document.getElementById('add-name-label');
+            const timeContainer = document.getElementById('add-time-container');
+            const modalTitle = document.getElementById('add-modal-title');
+            const iconContainer = document.getElementById('add-icon-container');
+
+            if (iconContainer) iconContainer.className = 'p-1.5 rounded-lg text-white';
+
+            if (type === 'staff') {
+                if (modalTitle) modalTitle.innerText = '新增在勤人員';
+                if (nameLabel) nameLabel.innerText = '人員姓名';
+                if (timeContainer) timeContainer.style.display = 'none';
+                if (iconContainer) iconContainer.classList.add('bg-indigo-600');
+            } else if (type === 'offduty') {
+                if (modalTitle) modalTitle.innerText = '登記休假人員';
+                if (nameLabel) nameLabel.innerText = '休假人員姓名';
+                if (timeContainer) timeContainer.style.display = 'none';
+                if (iconContainer) iconContainer.classList.add('bg-rose-600');
+            } else if (type === 'roles') {
+                if (modalTitle) modalTitle.innerText = '新增主要負責職責';
+                if (nameLabel) nameLabel.innerText = '職責/崗位名稱';
+                if (timeContainer) timeContainer.style.display = 'none';
+                if (iconContainer) iconContainer.classList.add('bg-emerald-600');
+            } else if (type === 'fixed') {
+                if (modalTitle) modalTitle.innerText = '新增固定工作';
+                if (nameLabel) nameLabel.innerText = '工作名稱';
+                if (timeContainer) timeContainer.style.display = 'block';
+                if (iconContainer) iconContainer.classList.add('bg-amber-600');
+            } else if (type === 'flexible') {
+                if (modalTitle) modalTitle.innerText = '新增機動性工作';
+                if (nameLabel) nameLabel.innerText = '工作項目名稱';
+                if (timeContainer) timeContainer.style.display = 'none';
+                if (iconContainer) iconContainer.classList.add('bg-rose-600');
+            } else if (type === 'closingTasks') {
+                if (modalTitle) modalTitle.innerText = '新增下班前工作';
+                if (nameLabel) nameLabel.innerText = '工作項目名稱';
+                if (timeContainer) timeContainer.style.display = 'none';
+                if (iconContainer) iconContainer.classList.add('bg-fuchsia-600');
+            } else if (type === 'emergencyTasks') {
+                if (modalTitle) modalTitle.innerText = '新增突發性工作';
+                if (nameLabel) nameLabel.innerText = '工作項目名稱';
+                if (timeContainer) timeContainer.style.display = 'none';
+                if (iconContainer) iconContainer.classList.add('bg-cyan-600');
+            }
+
+            const modal = document.getElementById('add-modal');
+            if (modal) modal.classList.remove('hidden');
+        }
+
+        function closeAddModal() {
+            const modal = document.getElementById('add-modal');
+            if (modal) modal.classList.add('hidden');
+        }
+
+        function addNewCard() {
+            if (isViewerMode) return;
+
+            const type = document.getElementById('add-item-type').value;
+            const nameInput = document.getElementById('add-item-name');
+            const name = nameInput ? nameInput.value.trim() : '';
+            const noteInput = document.getElementById('add-item-note');
+            const note = noteInput ? noteInput.value : '';
+            const timeInput = document.getElementById('add-item-time');
+            const time = timeInput ? timeInput.value.trim() : '';
+
+            if (!name) {
+                alert('名稱不能為空！');
+                return;
+            }
+
+            const newId = `${type === 'offduty' ? 'staff' : type}-${Date.now()}`;
+            const newObj = { id: newId, name: name, note: note };
+
+            if (type === 'staff') {
+                newObj.assignments = [];
+                if (!appData.staff) appData.staff = [];
+                appData.staff.push(newObj);
+            } else if (type === 'offduty') {
+                if (!appData.offDuty) appData.offDuty = [];
+                appData.offDuty.push({ id: newId, name: name, assignments: [] });
+            } else {
+                if (type === 'fixed') {
+                    newObj.time = time || '1個小時';
+                }
+                if (!appData[type]) {
+                    appData[type] = [];
+                }
+                appData[type].push(newObj);
+            }
+
+            saveData();
+            renderBoard();
+            closeAddModal();
+            showToast(`已成功新增「${name}」！`, 'plus-circle', 'text-emerald-500');
+        }
+
+
+        // ==================== 提示通知 Toast 邏輯 ====================
+        let toastTimeout;
+        function showToast(message, iconName = 'info', colorClass = 'text-blue-400') {
+            const toast = document.getElementById('toast');
+            const toastMessage = document.getElementById('toast-message');
+            const toastIcon = document.getElementById('toast-icon');
+
+            if (toastMessage) toastMessage.innerText = message;
+            if (toastIcon) {
+                toastIcon.className = `w-5 h-5 ${colorClass}`;
+                toastIcon.setAttribute('data-lucide', iconName);
+            }
+            lucide.createIcons();
+
+            if (toast) {
+                toast.classList.remove('translate-y-20', 'opacity-0');
+                toast.classList.add('translate-y-0', 'opacity-100');
+            }
+
+            clearTimeout(toastTimeout);
+            toastTimeout = setTimeout(() => {
+                if (toast) {
+                    toast.classList.add('translate-y-20', 'opacity-0');
+                    toast.classList.remove('translate-y-0', 'opacity-100');
+                }
+            }, 3000);
+        }
+    </script>
+</body>
+</html>
