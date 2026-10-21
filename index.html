@@ -222,9 +222,12 @@
                         <h2 class="font-bold text-slate-800 text-sm">1. 當日人員 (在勤)</h2>
                         <span id="staff-count" class="bg-indigo-50 text-indigo-700 text-xs font-bold px-1.5 py-0.2 rounded-full">0</span>
                     </div>
-                    <button onclick="openAddModal('staff')" class="p-1 text-indigo-600 hover:bg-indigo-50 rounded-md" title="新增在勤人員">
-                        <i data-lucide="user-plus" class="w-4.5 h-4.5"></i>
-                    </button>
+                    <div class="flex items-center gap-1 manager-only">
+                        <button onclick="openStaffRosterModal()" class="px-2 py-1 text-xs font-bold text-indigo-700 bg-indigo-50 hover:bg-indigo-100 rounded-md whitespace-nowrap" title="管理全體資材人員名單">人員名單管理</button>
+                        <button onclick="openAddModal('staff')" class="p-1 text-indigo-600 hover:bg-indigo-50 rounded-md" title="新增當日在勤人員">
+                            <i data-lucide="user-plus" class="w-4.5 h-4.5"></i>
+                        </button>
+                    </div>
                 </div>
                 <!-- 列表容器 -->
                 <div id="staff-list" class="flex-1 overflow-y-auto space-y-3.5 pr-0.5">
@@ -416,6 +419,28 @@
         </div>
     </div>
 
+    <!-- ==================== 資材人員名單管理（全域名單） ==================== -->
+    <div id="staff-roster-modal" class="fixed inset-0 bg-slate-900/60 backdrop-blur-sm hidden items-center justify-center p-4" style="z-index:80">
+        <div class="bg-white rounded-2xl shadow-2xl w-full max-w-xl max-h-[90vh] flex flex-col">
+            <div class="p-6 border-b border-slate-100">
+                <h3 class="font-black text-xl text-slate-900">資材人員名單管理</h3>
+                <p class="text-sm text-slate-500 mt-2">在這裡新增、改名或停用人員。停用不會刪除已儲存的歷史派工資料。</p>
+                <div class="flex gap-2 mt-4">
+                    <input id="staff-roster-new-name" type="text" maxlength="40" class="flex-1 border border-slate-300 rounded-lg px-3 py-2 font-semibold" placeholder="輸入新進人員姓名">
+                    <button onclick="addStaffRosterEntry()" class="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg font-bold whitespace-nowrap">新增人員</button>
+                </div>
+            </div>
+            <div id="staff-roster-list" class="p-4 overflow-y-auto space-y-2 flex-1"></div>
+            <div class="p-5 border-t border-slate-100 flex justify-between items-center gap-3">
+                <span class="text-xs text-slate-500">儲存後會更新目前選取日期的人員名單。</span>
+                <div class="flex gap-2">
+                    <button onclick="closeStaffRosterModal()" class="px-4 py-2 border rounded-lg font-bold text-slate-600">取消</button>
+                    <button onclick="saveStaffRoster()" class="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg font-bold">儲存名單</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
     <!-- ==================== 自訂確認視窗 (替代 confirm) ==================== -->
     <div id="confirm-modal" class="fixed inset-0 bg-black/70 flex items-center justify-center hidden p-4">
         <div class="bg-white rounded-2xl shadow-2xl w-full max-w-sm p-6 space-y-4">
@@ -503,6 +528,10 @@
         let isManager = false;
         let authReady = false;
         let cloudLoadToken = 0;
+        // 全域資材人員名單（與每日派工資料分開儲存）
+        let staffRoster = null;
+        let staffRosterDraft = [];
+
         let cloudSaveTimer = null;
         let isLoadingCloudData = false;
         let cloudErrorShown = false;
@@ -537,6 +566,7 @@
                     initDefaultDate();
                 }
                 updateDayOfWeekDisplay();
+                await loadStaffRoster(false);
                 await loadCloudDataForSelectedDate();
                 renderBoard();
                 lucide.createIcons();
@@ -591,16 +621,212 @@
             return normalized;
         }
 
+
+        // ==================== 全域資材人員名單管理 ====================
+        async function loadStaffRoster(seedIfMissing = false) {
+            if (!firestoreDb || !currentUser) return null;
+            try {
+                const snap = await firestoreDb.collection('settings').doc('staffRoster').get();
+                if (snap.exists && Array.isArray(snap.data().staffRoster)) {
+                    staffRoster = snap.data().staffRoster
+                        .filter(p => p && p.id && p.name)
+                        .map(p => ({ id: String(p.id), name: String(p.name), active: p.active !== false }));
+                } else {
+                    staffRoster = null;
+                    if (seedIfMissing && isManager) {
+                        const combined = [...(defaultData.offDuty || []), ...(appData.staff || []), ...(appData.offDuty || [])];
+                        const byId = new Map();
+                        combined.forEach(p => {
+                            if (p && p.id && p.name && !byId.has(String(p.id))) {
+                                byId.set(String(p.id), { id: String(p.id), name: String(p.name), active: true });
+                            }
+                        });
+                        staffRoster = Array.from(byId.values());
+                    }
+                }
+                return staffRoster;
+            } catch (err) {
+                console.error('讀取全域人員名單失敗:', err);
+                showToast('無法讀取全域人員名單，請確認 Firestore 規則已加入 settings/staffRoster。', 'alert-triangle', 'text-red-500');
+                return null;
+            }
+        }
+
+        function openStaffRosterModal() {
+            if (!isManager || isViewerMode) return;
+            (async () => {
+                const loaded = await loadStaffRoster(true);
+                if (!loaded) return;
+                staffRosterDraft = loaded.map(p => ({ ...p }));
+                renderStaffRosterDraft();
+                const modal = document.getElementById('staff-roster-modal');
+                modal.classList.remove('hidden');
+                modal.classList.add('flex');
+                const input = document.getElementById('staff-roster-new-name');
+                if (input) { input.value = ''; input.focus(); }
+            })();
+        }
+
+        function closeStaffRosterModal() {
+            const modal = document.getElementById('staff-roster-modal');
+            if (modal) {
+                modal.classList.add('hidden');
+                modal.classList.remove('flex');
+            }
+        }
+
+        function renderStaffRosterDraft() {
+            const list = document.getElementById('staff-roster-list');
+            if (!list) return;
+            if (!staffRosterDraft.length) {
+                list.innerHTML = '<div class="text-center py-8 text-slate-400">目前沒有人員，請在上方新增。</div>';
+                return;
+            }
+            list.innerHTML = staffRosterDraft.map((p, index) => `
+                <div class="flex items-center gap-2 p-3 rounded-xl border ${p.active ? 'border-slate-200 bg-white' : 'border-rose-200 bg-rose-50'}">
+                    <input type="text" maxlength="40" value="${escapeRosterHtml(p.name)}"
+                        onchange="updateStaffRosterName(${index}, this.value)"
+                        class="min-w-0 flex-1 border border-slate-200 rounded-lg px-3 py-2 font-semibold ${p.active ? '' : 'text-slate-400 line-through'}"
+                        aria-label="人員姓名">
+                    <label class="flex items-center gap-1.5 text-sm font-bold whitespace-nowrap ${p.active ? 'text-emerald-700' : 'text-rose-600'}">
+                        <input type="checkbox" ${p.active ? 'checked' : ''} onchange="toggleStaffRosterActive(${index}, this.checked)" class="w-4 h-4">
+                        ${p.active ? '在職' : '停用'}
+                    </label>
+                    <button onclick="removeStaffRosterDraft(${index})" class="px-2 py-2 rounded-lg text-xs font-bold text-rose-600 hover:bg-rose-100" title="從全域名單移除">移除</button>
+                </div>
+            `).join('');
+        }
+
+        function escapeRosterHtml(value) {
+            return String(value ?? '').replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
+        }
+
+        function updateStaffRosterName(index, value) {
+            const name = String(value || '').trim();
+            if (!name) {
+                showToast('人員姓名不能空白。', 'alert-triangle', 'text-rose-500');
+                renderStaffRosterDraft();
+                return;
+            }
+            const duplicate = staffRosterDraft.some((p, i) => i !== index && p.name.trim() === name && p.active);
+            if (duplicate) {
+                showToast('在職人員已有相同姓名，請確認。', 'alert-triangle', 'text-amber-500');
+                renderStaffRosterDraft();
+                return;
+            }
+            staffRosterDraft[index].name = name;
+        }
+
+        function toggleStaffRosterActive(index, active) {
+            if (staffRosterDraft[index]) {
+                staffRosterDraft[index].active = !!active;
+                renderStaffRosterDraft();
+            }
+        }
+
+        function addStaffRosterEntry() {
+            const input = document.getElementById('staff-roster-new-name');
+            const name = String(input?.value || '').trim();
+            if (!name) { showToast('請先輸入新進人員姓名。', 'alert-triangle', 'text-amber-500'); return; }
+            if (staffRosterDraft.some(p => p.active && p.name.trim() === name)) {
+                showToast('這位人員已在職，不需要重複新增。', 'alert-triangle', 'text-amber-500'); return;
+            }
+            const existing = staffRosterDraft.find(p => p.name.trim() === name);
+            if (existing) {
+                existing.active = true;
+            } else {
+                staffRosterDraft.push({ id: 'staff-' + Date.now() + '-' + Math.random().toString(36).slice(2, 7), name, active: true });
+            }
+            input.value = '';
+            renderStaffRosterDraft();
+            input.focus();
+        }
+
+        function removeStaffRosterDraft(index) {
+            const person = staffRosterDraft[index];
+            if (!person) return;
+            if (!confirm('確定要從全域人員名單移除「' + person.name + '」？歷史派工資料不會被刪除。')) return;
+            staffRosterDraft.splice(index, 1);
+            renderStaffRosterDraft();
+        }
+
+        function syncCurrentDayWithStaffRoster() {
+            if (!Array.isArray(staffRoster)) return false;
+            const oldStaff = Array.isArray(appData.staff) ? appData.staff : [];
+            const oldOffDuty = Array.isArray(appData.offDuty) ? appData.offDuty : [];
+            const oldById = new Map([...oldStaff, ...oldOffDuty].filter(Boolean).map(p => [String(p.id), p]));
+            const nextStaff = [];
+            const nextOffDuty = [];
+            staffRoster.filter(p => p.active).forEach(p => {
+                const existing = oldById.get(String(p.id));
+                if (existing) {
+                    existing.name = p.name;
+                    if (!Array.isArray(existing.assignments)) existing.assignments = [];
+                    if (oldStaff.some(s => String(s.id) === String(p.id))) nextStaff.push(existing);
+                    else nextOffDuty.push(existing);
+                } else {
+                    nextOffDuty.push({ id: p.id, name: p.name, assignments: [] });
+                }
+            });
+            // 停用/移除的人員若當日仍有已派工作，保留在當日，避免直接丟失派工；無指派者從當日名單移除。
+            [...oldStaff, ...oldOffDuty].forEach(p => {
+                if (!p || !p.id || staffRoster.some(r => r.id === String(p.id) && r.active)) return;
+                const hasAssignments = Array.isArray(p.assignments) && p.assignments.length > 0;
+                if (hasAssignments && oldStaff.some(s => String(s.id) === String(p.id))) {
+                    nextStaff.push(p);
+                }
+            });
+            const changed = JSON.stringify(oldStaff) !== JSON.stringify(nextStaff) || JSON.stringify(oldOffDuty) !== JSON.stringify(nextOffDuty);
+            appData.staff = nextStaff;
+            appData.offDuty = nextOffDuty;
+            return changed;
+        }
+
+        async function saveStaffRoster() {
+            if (!currentUser || !isManager || isViewerMode || !firestoreDb) {
+                showToast('只有管理者可以修改人員名單。', 'shield-alert', 'text-rose-500');
+                return;
+            }
+            const names = staffRosterDraft.filter(p => p.active).map(p => p.name.trim().toLowerCase());
+            if (names.some((name, i) => !name || names.indexOf(name) !== i)) {
+                showToast('在職人員姓名不可空白或重複。', 'alert-triangle', 'text-rose-500');
+                return;
+            }
+            try {
+                staffRoster = staffRosterDraft.map(p => ({ id: String(p.id), name: String(p.name).trim(), active: !!p.active }));
+                await firestoreDb.collection('settings').doc('staffRoster').set({
+                    staffRoster,
+                    updatedAt: firebase.firestore.FieldValue.serverTimestamp(),
+                    updatedBy: currentUser.email || currentUser.uid
+                });
+                syncCurrentDayWithStaffRoster();
+                saveData();
+                renderBoard();
+                closeStaffRosterModal();
+                showToast('全域人員名單已儲存，並更新目前日期。', 'check-circle', 'text-emerald-500');
+            } catch (err) {
+                console.error('儲存全域人員名單失敗:', err);
+                showToast('人員名單儲存失敗，請確認 Firestore 安全規則。', 'alert-triangle', 'text-red-500');
+            }
+        }
+
         async function loadCloudDataForSelectedDate() {
             if (!currentUser || !firestoreDb) return;
             const token = ++cloudLoadToken;
             const date = selectedDispatchDate();
+            let shouldSaveRosterSync = false;
+            const todayLocal = new Date();
+            const todayKey = `${todayLocal.getFullYear()}-${String(todayLocal.getMonth() + 1).padStart(2, '0')}-${String(todayLocal.getDate()).padStart(2, '0')}`;
             isLoadingCloudData = true;
             try {
                 const snap = await firestoreDb.collection('dispatchDays').doc(date).get();
                 if (token !== cloudLoadToken) return;
                 if (snap.exists && snap.data() && snap.data().appData) {
                     appData = normalizeAppData(snap.data().appData);
+                    // 全域名單更新後，切換到今天或未來日期時同步人員；歷史日期保留當時名單。
+                    if (date >= todayKey && Array.isArray(staffRoster)) {
+                        shouldSaveRosterSync = syncCurrentDayWithStaffRoster();
+                    }
                 } else {
                     // 只在第一次遷移時，把舊版本機資料帶到目前選取日期；之後未建立的日期使用預設模板，避免日期間資料互相複製。
                     const migrationKey = 'dispatch_firebase_legacy_migrated_v1';
@@ -611,6 +837,7 @@
                         localStorage.setItem(migrationKey, '1');
                     } else {
                         appData = JSON.parse(JSON.stringify(defaultData));
+                        if (Array.isArray(staffRoster)) syncCurrentDayWithStaffRoster();
                     }
                 }
                 localStorage.setItem('dispatch_system_data_v6', JSON.stringify(appData));
@@ -624,6 +851,9 @@
                 loadData();
             } finally {
                 if (token === cloudLoadToken) isLoadingCloudData = false;
+            }
+            if (token === cloudLoadToken && shouldSaveRosterSync && currentUser && isManager && !isViewerMode) {
+                await saveCloudDataNow();
             }
         }
 
