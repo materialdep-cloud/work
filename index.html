@@ -531,7 +531,8 @@
                     const dateParam = new URLSearchParams(location.search).get('date');
                     const dateInput = document.getElementById('dispatch-date');
                     if (dateInput && dateParam && /^\d{4}-\d{2}-\d{2}$/.test(dateParam)) dateInput.value = dateParam;
-                    if (dateInput) dateInput.disabled = true;
+                    // 唯讀同仁仍可切換日期，只限制派工內容的編輯。
+                    if (dateInput) dateInput.disabled = false;
                 } else {
                     initDefaultDate();
                 }
@@ -685,8 +686,9 @@
                 if (actions) actions.classList.add('hidden');
                 const dateInput = document.getElementById('dispatch-date');
                 if (dateInput) {
-                    dateInput.disabled = true;
-                    dateInput.classList.add('opacity-80', 'cursor-not-allowed');
+                    // 唯讀模式可以選擇日期查看歷史派工，但不能編輯派工內容。
+                    dateInput.disabled = false;
+                    dateInput.classList.remove('opacity-80', 'cursor-not-allowed');
                 }
                 const detailTitle = document.getElementById('detail-modal-title');
                 const detailCloseBtn = document.getElementById('detail-close-btn');
@@ -786,7 +788,11 @@
 
         async function handleDispatchDateChange() {
             updateDayOfWeekDisplay();
-            if (!currentUser || isViewerMode) return;
+            if (!currentUser) return;
+            // 管理者與唯讀同仁都可以切換日期；唯讀權限只限制修改，不限制查看歷史日期。
+            const url = new URL(window.location.href);
+            url.searchParams.set('date', selectedDispatchDate());
+            window.history.replaceState({}, '', url.toString());
             await loadCloudDataForSelectedDate();
             renderBoard();
             lucide.createIcons();
