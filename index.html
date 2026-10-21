@@ -4,6 +4,10 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>互動式派工管理看板</title>
+    <!-- Firebase SDK (Compat，保留原本非 module 的 HTML 程式架構) -->
+    <script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-app-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-auth-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore-compat.js"></script>
     <!-- Tailwind CSS CDN -->
     <script src="https://cdn.tailwindcss.com"></script>
     <!-- Lucide Icons -->
@@ -49,6 +53,21 @@
     </style>
 </head>
 <body class="bg-slate-50 min-h-screen text-slate-800 font-sans">
+
+    <!-- Firebase 登入遮罩：未登入者無法查看派工資料 -->
+    <div id="auth-gate" class="fixed inset-0 z-[9999] bg-slate-900/80 flex items-center justify-center p-4">
+        <div class="bg-white rounded-2xl shadow-2xl max-w-md w-full p-7 text-center space-y-4">
+            <div class="mx-auto w-14 h-14 rounded-2xl bg-blue-600 text-white flex items-center justify-center text-2xl">🔐</div>
+            <h2 class="text-2xl font-black text-slate-900">資材派工系統</h2>
+            <p class="text-slate-600">請使用公司授權的 Google 帳號登入，才能查看每日派工資料。</p>
+            <button id="google-login-btn" onclick="signInWithGoogle()" class="w-full rounded-xl bg-blue-600 hover:bg-blue-700 text-white font-bold py-3 px-4">使用 Google 帳號登入</button>
+            <p id="auth-status" class="text-sm text-slate-500" role="status">正在初始化登入服務…</p>
+        </div>
+    </div>
+    <div id="auth-user-bar" class="hidden bg-blue-50 border-b border-blue-100 px-4 py-2 text-sm flex flex-wrap items-center justify-between gap-2">
+        <span>登入帳號：<strong id="signed-in-email"></strong> <span id="role-badge" class="ml-2 rounded-full px-2 py-1 text-xs font-bold"></span></span>
+        <button onclick="signOutGoogle()" class="rounded-lg border border-slate-300 bg-white px-3 py-1 font-bold hover:bg-slate-50">登出</button>
+    </div>
 
     <!-- 頂部導覽列 -->
     <header class="bg-white border-b border-slate-200 sticky top-0 z-10 px-6 py-4 shadow-sm">
@@ -113,7 +132,7 @@
                             <div class="flex items-center gap-2.5 bg-blue-50/50 hover:bg-blue-50 border-2 border-blue-200 px-5 py-2 rounded-2xl shadow-xs transition-all">
                                 <span class="text-sm font-black text-blue-700 uppercase tracking-wider">派工日期:</span>
                                 <div class="flex items-center gap-1 font-black text-lg md:text-xl text-blue-900">
-                                    <input type="date" id="dispatch-date" onchange="updateDayOfWeekDisplay()" class="bg-transparent border-none p-0 focus:ring-0 focus:outline-hidden font-black cursor-pointer w-[145px]">
+                                    <input type="date" id="dispatch-date" onchange="handleDispatchDateChange()" class="bg-transparent border-none p-0 focus:ring-0 focus:outline-hidden font-black cursor-pointer w-[145px]">
                                     <span id="day-of-week-display" class="text-blue-700 font-black ml-1 text-xl"></span>
                                 </div>
                             </div>
@@ -466,16 +485,172 @@
         let confirmCallback = null;
         let isViewerMode = false; // 是否在唯讀模式中
 
+        // ==================== Firebase 設定 ====================
+        const firebaseConfig = {
+            apiKey: "AIzaSyD4iP_y8ZCbFHHJ4GJSXy7TYGSi4WZsWdg",
+            authDomain: "material-dispatch.firebaseapp.com",
+            projectId: "material-dispatch",
+            storageBucket: "material-dispatch.firebasestorage.app",
+            messagingSenderId: "117435539313",
+            appId: "1:117435539313:web:f09c821dfdae8e364160d0",
+            measurementId: "G-4LF4DQBGWC"
+        };
+        // 請把這個值改成「管理者自己的 Google 電子郵件」；需與 Firestore 規則中的信箱一致。
+        const MANAGER_EMAIL = "material_dep@greenliving.com.tw".trim().toLowerCase();
+        let firebaseAuth = null;
+        let firestoreDb = null;
+        let currentUser = null;
+        let isManager = false;
+        let authReady = false;
+        let cloudLoadToken = 0;
+        let cloudSaveTimer = null;
+        let isLoadingCloudData = false;
+        let cloudErrorShown = false;
+
+        function initFirebaseServices() {
+            if (!firebase.apps.length) firebase.initializeApp(firebaseConfig);
+            firebaseAuth = firebase.auth();
+            firestoreDb = firebase.firestore();
+            // Google 登入只允許經過 Authentication 的已授權網域。
+            firebaseAuth.setPersistence(firebase.auth.Auth.Persistence.LOCAL).catch(console.warn);
+            firebaseAuth.onAuthStateChanged(async (user) => {
+                currentUser = user || null;
+                authReady = true;
+                isManager = !!(user && MANAGER_EMAIL !== "請填入管理者google信箱" &&
+                    (user.email || "").toLowerCase() === MANAGER_EMAIL);
+                updateAuthUI();
+                if (!user) {
+                    document.getElementById('auth-gate').classList.remove('hidden');
+                    document.getElementById('auth-status').innerText = '請使用 Google 帳號登入。';
+                    return;
+                }
+                document.getElementById('auth-gate').classList.add('hidden');
+                checkViewMode();
+                if (isViewerMode) {
+                    document.body.classList.add('viewer-active');
+                    const dateParam = new URLSearchParams(location.search).get('date');
+                    const dateInput = document.getElementById('dispatch-date');
+                    if (dateInput && dateParam && /^\d{4}-\d{2}-\d{2}$/.test(dateParam)) dateInput.value = dateParam;
+                    if (dateInput) dateInput.disabled = true;
+                } else {
+                    initDefaultDate();
+                }
+                updateDayOfWeekDisplay();
+                await loadCloudDataForSelectedDate();
+                renderBoard();
+                lucide.createIcons();
+            });
+        }
+
+        function updateAuthUI() {
+            const bar = document.getElementById('auth-user-bar');
+            const email = document.getElementById('signed-in-email');
+            const badge = document.getElementById('role-badge');
+            const status = document.getElementById('auth-status');
+            if (bar) bar.classList.toggle('hidden', !currentUser);
+            if (email) email.textContent = currentUser ? (currentUser.email || 'Google 帳號') : '';
+            if (badge) {
+                badge.textContent = isManager ? '管理者（可編輯）' : '唯讀檢視';
+                badge.className = 'ml-2 rounded-full px-2 py-1 text-xs font-bold ' + (isManager ? 'bg-emerald-100 text-emerald-700' : 'bg-slate-200 text-slate-700');
+            }
+            if (status && currentUser) status.innerText = '登入成功，正在載入派工資料…';
+            // 沒有管理者信箱設定時，安全地保持唯讀，避免所有登入者都可修改。
+            if (currentUser && MANAGER_EMAIL === '請填入管理者google信箱') {
+                showToast('請先在 HTML 設定 MANAGER_EMAIL，並套用 Firestore 安全規則。', 'alert-triangle', 'text-amber-500');
+            }
+            document.body.classList.toggle('viewer-active', !!currentUser && !isManager || isViewerMode);
+        }
+
+        async function signInWithGoogle() {
+            try {
+                if (!firebaseAuth) initFirebaseServices();
+                const provider = new firebase.auth.GoogleAuthProvider();
+                provider.setCustomParameters({ prompt: 'select_account' });
+                await firebaseAuth.signInWithPopup(provider);
+            } catch (err) {
+                console.error(err);
+                const status = document.getElementById('auth-status');
+                if (status) status.innerText = '登入失敗：' + (err.message || err.code || '請稍後重試');
+            }
+        }
+
+        async function signOutGoogle() {
+            if (firebaseAuth) await firebaseAuth.signOut();
+        }
+
+        function selectedDispatchDate() {
+            const input = document.getElementById('dispatch-date');
+            return input && input.value ? input.value : new Date().toISOString().slice(0, 10);
+        }
+
+        function normalizeAppData(data) {
+            const normalized = data && typeof data === 'object' ? data : JSON.parse(JSON.stringify(defaultData));
+            if (!normalized.emergencyTasks) normalized.emergencyTasks = JSON.parse(JSON.stringify(defaultData.emergencyTasks));
+            ['staff', 'offDuty'].forEach(key => (normalized[key] || []).forEach(p => { if (!p.assignments) p.assignments = []; }));
+            return normalized;
+        }
+
+        async function loadCloudDataForSelectedDate() {
+            if (!currentUser || !firestoreDb) return;
+            const token = ++cloudLoadToken;
+            const date = selectedDispatchDate();
+            isLoadingCloudData = true;
+            try {
+                const snap = await firestoreDb.collection('dispatchDays').doc(date).get();
+                if (token !== cloudLoadToken) return;
+                if (snap.exists && snap.data() && snap.data().appData) {
+                    appData = normalizeAppData(snap.data().appData);
+                } else {
+                    // 只在第一次遷移時，把舊版本機資料帶到目前選取日期；之後未建立的日期使用預設模板，避免日期間資料互相複製。
+                    const migrationKey = 'dispatch_firebase_legacy_migrated_v1';
+                    const localSaved = localStorage.getItem('dispatch_system_data_v6');
+                    if (!localStorage.getItem(migrationKey) && localSaved) {
+                        try { appData = normalizeAppData(JSON.parse(localSaved)); }
+                        catch (_) { appData = JSON.parse(JSON.stringify(defaultData)); }
+                        localStorage.setItem(migrationKey, '1');
+                    } else {
+                        appData = JSON.parse(JSON.stringify(defaultData));
+                    }
+                }
+                localStorage.setItem('dispatch_system_data_v6', JSON.stringify(appData));
+            } catch (err) {
+                console.error('Firestore 讀取失敗:', err);
+                if (!cloudErrorShown) {
+                    showToast('雲端讀取失敗，請確認 Firestore 安全規則與登入權限。', 'alert-triangle', 'text-red-500');
+                    cloudErrorShown = true;
+                }
+                // 發生權限錯誤時不把本機資料自動寫入雲端。
+                loadData();
+            } finally {
+                if (token === cloudLoadToken) isLoadingCloudData = false;
+            }
+        }
+
+        async function saveCloudDataNow() {
+            if (!currentUser || !firestoreDb || !isManager || isViewerMode || isLoadingCloudData) return;
+            const date = selectedDispatchDate();
+            try {
+                await firestoreDb.collection('dispatchDays').doc(date).set({
+                    date,
+                    appData: JSON.parse(JSON.stringify(appData)),
+                    updatedAt: firebase.firestore.FieldValue.serverTimestamp(),
+                    updatedBy: currentUser.email || currentUser.uid
+                }, { merge: true });
+                showToast('已儲存至雲端：' + date, 'cloud', 'text-emerald-500');
+            } catch (err) {
+                console.error('Firestore 儲存失敗:', err);
+                showToast('雲端儲存失敗，請檢查登入帳號與 Firestore 規則。', 'alert-triangle', 'text-red-500');
+            }
+        }
+
         // 👥 共同分擔時追蹤當前點選的指派人員與其索引
         let activeStaffId = null;
         let activeAssignmentIndex = null;
 
         // 初始化
         window.addEventListener('DOMContentLoaded', () => {
-            checkViewMode(); // 優先檢查網址是否帶有唯讀參數
-            initDefaultDate(); // 自動帶入明日日期
-            renderBoard();
-            lucide.createIcons();
+            // Firebase 登入成功後才載入資料並繪製看板。
+            initFirebaseServices();
             
             // 監聽鍵盤 ESC 鍵以關閉視窗
             window.addEventListener('keydown', (e) => {
@@ -497,56 +672,30 @@
         // 🚨 檢測網址參數：決定是否開啟「同仁唯讀檢視模式」
         function checkViewMode() {
             const urlParams = new URLSearchParams(window.location.search);
-            const mode = urlParams.get('mode');
-            const sharedDataStr = urlParams.get('d');
-
-            if (mode === 'viewer') {
-                isViewerMode = true;
+            isViewerMode = urlParams.get('mode') === 'viewer' || !isManager;
+            if (isViewerMode) {
                 document.body.classList.add('viewer-active');
-                
-                // 調整網頁標題
                 const titleEl = document.getElementById('main-title');
                 const subtitleEl = document.getElementById('main-subtitle');
-                if (titleEl) titleEl.innerText = "明日現場派工單【唯讀檢視】";
-                if (subtitleEl) subtitleEl.innerText = "點擊下方表格內任何一項任務即可查看工作細項與注意事項";
-
-                // 顯示唯讀專用介面元素
+                if (titleEl) titleEl.innerText = '明日現場派工單【唯讀檢視】';
+                if (subtitleEl) subtitleEl.innerText = '點擊工作字卡即可查看工作細項與注意事項';
                 const banner = document.getElementById('viewer-banner');
                 const actions = document.getElementById('viewer-header-actions');
                 if (banner) banner.classList.remove('hidden');
-                if (actions) actions.classList.remove('hidden');
-                
-                // 鎖定日期選擇器
+                if (actions) actions.classList.add('hidden');
                 const dateInput = document.getElementById('dispatch-date');
                 if (dateInput) {
                     dateInput.disabled = true;
                     dateInput.classList.add('opacity-80', 'cursor-not-allowed');
                 }
-
-                // 修改彈窗按鈕細節
                 const detailTitle = document.getElementById('detail-modal-title');
                 const detailCloseBtn = document.getElementById('detail-close-btn');
-                if (detailTitle) detailTitle.innerText = "工作細項與注意事項";
-                if (detailCloseBtn) detailCloseBtn.innerText = "關閉視窗";
-
-                // 解碼分享連結中的數據
-                if (sharedDataStr) {
-                    try {
-                        // 💡 使用 LZString 解壓縮，縮短分享數據大小
-                        const decompressed = LZString.decompressFromEncodedURIComponent(sharedDataStr);
-                        appData = JSON.parse(decompressed);
-                    } catch (e) {
-                        console.error("解碼分享數據失敗:", e);
-                        showToast("讀取派工單失敗，已為您載入本機預設值！", "alert-triangle", "text-red-500");
-                        loadData();
-                    }
-                } else {
-                    loadData();
-                }
+                if (detailTitle) detailTitle.innerText = '工作細項與注意事項';
+                if (detailCloseBtn) detailCloseBtn.innerText = '關閉視窗';
             } else {
-                isViewerMode = false;
                 document.body.classList.remove('viewer-active');
-                loadData();
+                const dateInput = document.getElementById('dispatch-date');
+                if (dateInput) dateInput.disabled = false;
             }
         }
 
@@ -555,53 +704,24 @@
             const url = new URL(window.location.href);
             url.searchParams.delete('mode');
             url.searchParams.delete('d');
+            url.searchParams.delete('date');
             window.location.href = url.toString();
         }
 
         // 生成並複製「唯讀分享連結」給其他人看 (導入 LZString 壓縮提高分享效率)
         function copyReadOnlyShareLink() {
-            const dateInput = document.getElementById('dispatch-date');
-            const date = dateInput ? dateInput.value : '';
-
-            const shareData = {
-                staff: appData.staff || [],
-                offDuty: appData.offDuty || [],
-                roles: appData.roles || [],
-                fixed: appData.fixed || [],
-                flexible: appData.flexible || [],
-                closingTasks: appData.closingTasks || [],
-                emergencyTasks: appData.emergencyTasks || []
-            };
-
-            const jsonStr = JSON.stringify(shareData);
-            
-            try {
-                // 💡 使用 LZString 對資料進行壓縮編碼，縮短網址 70% 
-                const compressed = LZString.compressToEncodedURIComponent(jsonStr);
-
-                const url = new URL(window.location.href);
-                url.searchParams.set('mode', 'viewer');
-                url.searchParams.set('d', compressed);
-
-                // 複製到剪貼簿
-                const tempInput = document.createElement('textarea');
-                tempInput.value = url.toString();
-                tempInput.style.position = 'fixed';
-                document.body.appendChild(tempInput);
-                tempInput.select();
-                
-                const successful = document.execCommand('copy');
-                document.body.removeChild(tempInput);
-
-                if (successful) {
-                    showToast('已產生高壓縮分享網址！趕快發到 LINE 群組給同仁吧。', 'link', 'text-indigo-500');
-                } else {
-                    showToast('複製網址失敗，請手動複製地址列。', 'x', 'text-red-550');
-                }
-            } catch (err) {
-                console.error("生成連結錯誤：", err);
-                showToast('產生分享網址失敗！', 'x', 'text-red-500');
-            }
+            const url = new URL(window.location.href);
+            url.searchParams.set('mode', 'viewer');
+            url.searchParams.set('date', selectedDispatchDate());
+            url.searchParams.delete('d'); // 不把派工內容直接塞進網址
+            const tempInput = document.createElement('textarea');
+            tempInput.value = url.toString();
+            tempInput.style.position = 'fixed';
+            document.body.appendChild(tempInput);
+            tempInput.select();
+            const successful = document.execCommand('copy');
+            document.body.removeChild(tempInput);
+            showToast(successful ? '已複製唯讀網址；同事仍須使用授權 Google 帳號登入。' : '複製失敗，請手動複製網址列。', successful ? 'link' : 'x', successful ? 'text-indigo-500' : 'text-red-500');
         }
 
         // 讀取資料並提供「防禦性自動升級補全」
@@ -633,8 +753,13 @@
 
         // 儲存資料到 LocalStorage (唯讀模式下不儲存)
         function saveData() {
-            if (isViewerMode) return;
+            if (isViewerMode || (currentUser && !isManager)) return;
             localStorage.setItem('dispatch_system_data_v6', JSON.stringify(appData));
+            // 雲端防抖儲存：短時間連續操作只送出最後一次。
+            if (currentUser && isManager && !isLoadingCloudData) {
+                clearTimeout(cloudSaveTimer);
+                cloudSaveTimer = setTimeout(() => saveCloudDataNow(), 700);
+            }
         }
 
         // 自動帶入明天的日期
@@ -657,6 +782,14 @@
                 dateInput.value = `${yyyy}-${mm}-${dd}`;
             }
             updateDayOfWeekDisplay();
+        }
+
+        async function handleDispatchDateChange() {
+            updateDayOfWeekDisplay();
+            if (!currentUser || isViewerMode) return;
+            await loadCloudDataForSelectedDate();
+            renderBoard();
+            lucide.createIcons();
         }
 
         // 📅 新增：手動/自動計算日期並更新「星期幾」顯示
