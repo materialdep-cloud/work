@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>互動式派工管理看板</title>
+    <title>綠園生活資材部每日派工</title>
     <!-- Firebase SDK (Compat，保留原本非 module 的 HTML 程式架構) -->
     <script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-app-compat.js"></script>
     <script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-auth-compat.js"></script>
@@ -58,7 +58,7 @@
     <div id="auth-gate" class="fixed inset-0 z-[9999] bg-slate-900/80 flex items-center justify-center p-4">
         <div class="bg-white rounded-2xl shadow-2xl max-w-md w-full p-7 text-center space-y-4">
             <div class="mx-auto w-14 h-14 rounded-2xl bg-blue-600 text-white flex items-center justify-center text-2xl">🔐</div>
-            <h2 class="text-2xl font-black text-slate-900">資材派工系統</h2>
+            <h2 class="text-2xl font-black text-slate-900">綠園生活資材部每日派工</h2>
             <p class="text-slate-600">請使用公司授權的 Google 帳號登入，才能查看每日派工資料。</p>
             <button id="google-login-btn" onclick="signInWithGoogle()" class="w-full rounded-xl bg-blue-600 hover:bg-blue-700 text-white font-bold py-3 px-4">使用 Google 帳號登入</button>
             <p id="auth-status" class="text-sm text-slate-500" role="status">正在初始化登入服務…</p>
@@ -77,7 +77,7 @@
                     <i data-lucide="layout-dashboard" class="w-7 h-7"></i>
                 </div>
                 <div>
-                    <h1 class="text-2xl font-black text-slate-900 tracking-wide" id="main-title">資材派工系統</h1>
+                    <h1 class="text-2xl font-black text-slate-900 tracking-wide" id="main-title">綠園生活資材部每日派工</h1>
                 </div>
             </div>
             
@@ -112,7 +112,7 @@
                 <i data-lucide="info" class="w-6 h-6"></i>
             </div>
             <div>
-                <p class="text-sm md:text-base font-bold">📢 您目前正在以【唯讀檢視模式】觀看派工單</p>
+                <p class="text-sm md:text-base font-bold">📢 綠園生活資材部每日派工｜您目前正在以【唯讀檢視模式】觀看派工單</p>
                 <p class="text-xs md:text-sm opacity-90">您可以點擊表格內任何一個「彩色的工作字卡」來查看該工作的注意事項與細項備註！</p>
             </div>
         </div>
@@ -159,6 +159,25 @@
                 </div>
             </div>
             
+            <!-- Google 試算表排班資料：只讀取，不影響 Firebase 派工資料 -->
+            <section id="external-schedule-panel" class="mb-6 bg-white border border-violet-200 rounded-2xl shadow-sm overflow-hidden">
+                <div class="px-5 py-4 bg-violet-50 border-b border-violet-100 flex flex-wrap items-center justify-between gap-3">
+                    <div>
+                        <h2 class="text-lg md:text-xl font-black text-violet-950">📅 資材人員排班（Google 試算表）</h2>
+                        <p class="text-sm text-violet-800 mt-1">依上方派工日期顯示當日班別與休假；資料來源為每月排班表，這裡不會修改原始試算表。</p>
+                    </div>
+                    <div class="flex items-center gap-2">
+                        <span id="schedule-source-status" class="text-xs font-bold text-slate-500">尚未載入排班資料</span>
+                        <button type="button" onclick="loadExternalSchedule(true)" class="px-3 py-2 rounded-lg bg-violet-600 hover:bg-violet-700 text-white text-sm font-bold">↻ 更新排班</button>
+                    </div>
+                </div>
+                <div class="p-4 md:p-5">
+                    <div id="schedule-selected-date" class="font-black text-slate-800 mb-3">請選擇派工日期</div>
+                    <div id="schedule-content" class="text-sm text-slate-500">正在準備讀取排班資料……</div>
+                    <p class="text-xs text-slate-400 mt-3">辨識規則：主、63-7、理、63-7輔、理輔一律上班；其他有底色的內容判定為休假，「特」標示為特休。</p>
+                </div>
+            </section>
+
             <div class="grid grid-cols-1 lg:grid-cols-4 gap-6">
                 <!-- 左側：派工總表 (3/4 寬度) -->
                 <div class="lg:col-span-3 font-semibold">
@@ -536,6 +555,103 @@
         let isLoadingCloudData = false;
         let cloudErrorShown = false;
 
+        // ==================== Google 試算表排班讀取（唯讀 JSONP） ====================
+        const GOOGLE_SCHEDULE_ENDPOINT = "https://script.google.com/macros/s/AKfycbzRImuI3O3P1q_j53WPnbnF-f4LJxSfqq1ISjWv8TBtdeAC9i8Sh6So68fiTuqTZBGjuA/exec";
+        let externalScheduleRows = null;
+        let scheduleRequestInProgress = false;
+        let scheduleLastLoadedAt = null;
+
+        function loadExternalSchedule(forceRefresh = false) {
+            if (scheduleRequestInProgress && !forceRefresh) return;
+            const status = document.getElementById('schedule-source-status');
+            const content = document.getElementById('schedule-content');
+            if (status) status.textContent = '正在讀取 Google 試算表…';
+            if (content && !externalScheduleRows) content.innerHTML = '<p class="text-slate-500">正在讀取排班資料，請稍候……</p>';
+            scheduleRequestInProgress = true;
+
+            const callbackName = 'scheduleJsonp_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8);
+            const script = document.createElement('script');
+            let finished = false;
+            const cleanup = () => {
+                if (finished) return;
+                finished = true;
+                scheduleRequestInProgress = false;
+                try { delete window[callbackName]; } catch (_) { window[callbackName] = undefined; }
+                if (script.parentNode) script.parentNode.removeChild(script);
+            };
+
+            window[callbackName] = function (payload) {
+                cleanup();
+                if (!payload || payload.ok !== true || !Array.isArray(payload.rows)) {
+                    if (status) status.textContent = '讀取失敗';
+                    if (content) content.innerHTML = '<p class="text-rose-600 font-bold">Google 試算表回傳格式不正確，請按「更新排班」重試。</p>';
+                    return;
+                }
+                externalScheduleRows = payload.rows;
+                scheduleLastLoadedAt = new Date();
+                if (status) status.textContent = `已載入 ${payload.count ?? payload.rows.length} 筆 · ${scheduleLastLoadedAt.toLocaleTimeString('zh-TW', {hour:'2-digit', minute:'2-digit'})}`;
+                renderExternalScheduleForSelectedDate();
+            };
+
+            script.onerror = function () {
+                cleanup();
+                if (status) status.textContent = '連線失敗';
+                if (content) content.innerHTML = '<p class="text-rose-600 font-bold">無法讀取排班資料。請確認網路連線及 Apps Script 部署權限，再按「更新排班」。</p>';
+            };
+            script.src = GOOGLE_SCHEDULE_ENDPOINT + '?callback=' + encodeURIComponent(callbackName) + '&_=' + Date.now();
+            script.async = true;
+            document.head.appendChild(script);
+        }
+
+        function renderExternalScheduleForSelectedDate() {
+            const content = document.getElementById('schedule-content');
+            const dateLabel = document.getElementById('schedule-selected-date');
+            const dateInput = document.getElementById('dispatch-date');
+            if (!content) return;
+            const selectedDate = dateInput && dateInput.value ? dateInput.value : '';
+            if (dateLabel) dateLabel.textContent = selectedDate ? `📆 ${selectedDate} 排班` : '請選擇派工日期';
+
+            if (!selectedDate) {
+                content.innerHTML = '<p class="text-slate-500">請先選擇派工日期。</p>';
+                return;
+            }
+            if (selectedDate < '2026-10-01') {
+                content.innerHTML = '<p class="text-amber-700 bg-amber-50 border border-amber-200 rounded-xl p-3">排班資料從 2026 年 10 月開始提供；此日期之前沒有匯入排班資料。</p>';
+                return;
+            }
+            if (!Array.isArray(externalScheduleRows)) {
+                content.innerHTML = '<p class="text-slate-500">排班資料尚未載入，請稍候或按「更新排班」。</p>';
+                return;
+            }
+
+            const rows = externalScheduleRows.filter(row => row.date === selectedDate);
+            if (!rows.length) {
+                content.innerHTML = '<p class="text-slate-500 bg-slate-50 rounded-xl p-4">這一天沒有讀取到排班資料，請確認 Google 試算表分頁及日期列。</p>';
+                return;
+            }
+
+            const working = rows.filter(row => !row.off);
+            const off = rows.filter(row => row.off);
+            const esc = value => String(value ?? '').replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
+            const roleText = row => {
+                if (!row.role) return '休假';
+                if (row.role === '63-7') return '63-7（07:00～16:00）';
+                return esc(row.role);
+            };
+            const rowHtml = row => `<div class="flex flex-wrap items-center justify-between gap-2 rounded-xl border ${row.off ? 'border-rose-200 bg-rose-50' : 'border-emerald-200 bg-emerald-50'} px-3 py-2">
+                <div class="font-bold text-slate-800">${esc(row.person)}</div>
+                <div class="flex items-center gap-2">
+                    <span class="text-sm font-black ${row.off ? 'text-rose-700' : 'text-emerald-800'}">${roleText(row)}</span>
+                    <span class="text-xs rounded-full px-2 py-1 font-bold ${row.off ? 'bg-rose-100 text-rose-700' : 'bg-emerald-100 text-emerald-700'}">${row.off ? esc(row.leaveType || '休假') : '上班'}</span>
+                </div>
+            </div>`;
+
+            content.innerHTML = `<div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div><div class="flex items-center justify-between mb-2"><h3 class="font-black text-emerald-800">🟢 上班</h3><span class="text-xs font-bold text-slate-500">${working.length} 人</span></div><div class="space-y-2">${working.length ? working.map(rowHtml).join('') : '<p class="text-sm text-slate-400">沒有上班資料</p>'}</div></div>
+                <div><div class="flex items-center justify-between mb-2"><h3 class="font-black text-rose-800">🔴 休假</h3><span class="text-xs font-bold text-slate-500">${off.length} 人</span></div><div class="space-y-2">${off.length ? off.map(rowHtml).join('') : '<p class="text-sm text-slate-400">沒有休假資料</p>'}</div></div>
+            </div>`;
+        }
+
         function initFirebaseServices() {
             if (!firebase.apps.length) firebase.initializeApp(firebaseConfig);
             firebaseAuth = firebase.auth();
@@ -566,6 +682,7 @@
                     initDefaultDate();
                 }
                 updateDayOfWeekDisplay();
+                renderExternalScheduleForSelectedDate();
                 await loadStaffRoster(false);
                 await loadCloudDataForSelectedDate();
                 renderBoard();
@@ -880,6 +997,8 @@
 
         // 初始化
         window.addEventListener('DOMContentLoaded', () => {
+            // Google 試算表排班獨立唯讀載入，不依賴 Firebase 派工資料。
+            loadExternalSchedule();
             // Firebase 登入成功後才載入資料並繪製看板。
             initFirebaseServices();
             
@@ -908,7 +1027,7 @@
                 document.body.classList.add('viewer-active');
                 const titleEl = document.getElementById('main-title');
                 const subtitleEl = document.getElementById('main-subtitle');
-                if (titleEl) titleEl.innerText = '明日現場派工單【唯讀檢視】';
+                if (titleEl) titleEl.innerText = '綠園生活資材部每日派工【唯讀檢視】';
                 if (subtitleEl) subtitleEl.innerText = '點擊工作字卡即可查看工作細項與注意事項';
                 const banner = document.getElementById('viewer-banner');
                 const actions = document.getElementById('viewer-header-actions');
@@ -1018,6 +1137,7 @@
 
         async function handleDispatchDateChange() {
             updateDayOfWeekDisplay();
+            renderExternalScheduleForSelectedDate();
             if (!currentUser) return;
             // 管理者與唯讀同仁都可以切換日期；唯讀權限只限制修改，不限制查看歷史日期。
             const url = new URL(window.location.href);
