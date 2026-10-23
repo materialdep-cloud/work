@@ -589,6 +589,8 @@
                 }
                 externalScheduleRows = payload.rows;
                 scheduleLastLoadedAt = new Date();
+                syncSelectedScheduleToDispatch();
+                renderBoard();
                 if (status) status.textContent = `已載入 ${payload.count ?? payload.rows.length} 筆 · ${scheduleLastLoadedAt.toLocaleTimeString('zh-TW', {hour:'2-digit', minute:'2-digit'})}`;
                 renderExternalScheduleForSelectedDate();
             };
@@ -601,6 +603,80 @@
             script.src = GOOGLE_SCHEDULE_ENDPOINT + '?callback=' + encodeURIComponent(callbackName) + '&_=' + Date.now();
             script.async = true;
             document.head.appendChild(script);
+        }
+
+        // 將 Google 班表同步到下方派工看板：在勤名單 + 主要負責
+        // 只管理由班表自動產生的 primary 指派，不刪除使用者手動安排的工作。
+        function syncSelectedScheduleToDispatch() {
+            if (!Array.isArray(externalScheduleRows) || !appData || !Array.isArray(appData.staff) || !Array.isArray(appData.offDuty)) return false;
+            const dateInput = document.getElementById('dispatch-date');
+            const selectedDate = dateInput && dateInput.value ? dateInput.value : '';
+            if (!selectedDate || selectedDate < '2026-10-01') return false;
+            const dayRows = externalScheduleRows.filter(row => row.date === selectedDate && row.person);
+            if (!dayRows.length) return false;
+
+            const roleAliases = {
+                '主': '主控',
+                '主控': '主控',
+                '63-7': '63-7',
+                '63-7輔': '63-7輔',
+                '理': '63-6理貨倉',
+                '理輔': '63-6輔'
+            };
+            const allPeople = [...appData.staff, ...appData.offDuty];
+            const byName = new Map(allPeople.map(person => [String(person.name || '').trim(), person]));
+            let changed = false;
+            const nextStaff = [];
+            const nextOffDuty = [];
+
+            dayRows.forEach(row => {
+                const name = String(row.person || '').trim();
+                if (!name) return;
+                let person = byName.get(name);
+                if (!person) {
+                    const rosterPerson = Array.isArray(staffRoster) ? staffRoster.find(p => String(p.name || '').trim() === name && p.active) : null;
+                    person = rosterPerson ? { id: rosterPerson.id, name, assignments: [] } : { id: 'schedule-' + name, name, assignments: [] };
+                    byName.set(name, person);
+                    changed = true;
+                }
+                person.name = name;
+                if (!Array.isArray(person.assignments)) person.assignments = [];
+                // 先移除這個人上次由班表自動產生的主要工作，再按當日班表重建。
+                const before = JSON.stringify(person.assignments);
+                person.assignments = person.assignments.filter(a => !a || a.fromGoogleSchedule !== true);
+                if (!row.off && row.role) {
+                    const roleName = roleAliases[String(row.role).trim()] || String(row.role).trim();
+                    const roleItem = (appData.roles || []).find(r => String(r.name || '').trim() === roleName);
+                    if (roleItem) {
+                        person.assignments.push({
+                            originId: roleItem.id, type: 'roles', name: roleItem.name,
+                            note: roleItem.note || '', shift: 'primary', time: null, originalTime: null,
+                            fromGoogleSchedule: true
+                        });
+                    }
+                }
+                if (before !== JSON.stringify(person.assignments)) changed = true;
+                if (row.off) nextOffDuty.push(person);
+                else nextStaff.push(person);
+            });
+
+            // 保留不在當日班表回傳清單中的既有人員，避免刪除其他資料或手動新增人員。
+            const listedNames = new Set(dayRows.map(row => String(row.person || '').trim()));
+            [...appData.staff, ...appData.offDuty].forEach(person => {
+                const name = String(person && person.name || '').trim();
+                if (!name || listedNames.has(name)) return;
+                if ((person.assignments || []).some(a => a && a.fromGoogleSchedule !== true) && appData.staff.some(p => p.id === person.id)) nextStaff.push(person);
+                else nextOffDuty.push(person);
+            });
+
+            const dedupe = list => [...new Map(list.map(p => [String(p.id), p])).values()];
+            const finalStaff = dedupe(nextStaff);
+            const finalOffDuty = dedupe(nextOffDuty).filter(p => !finalStaff.some(s => String(s.id) === String(p.id)));
+            if (JSON.stringify(appData.staff) !== JSON.stringify(finalStaff) || JSON.stringify(appData.offDuty) !== JSON.stringify(finalOffDuty)) changed = true;
+            appData.staff = finalStaff;
+            appData.offDuty = finalOffDuty;
+            if (changed && currentUser && isManager && !isViewerMode) saveData();
+            return changed;
         }
 
         function renderExternalScheduleForSelectedDate() {
@@ -685,6 +761,7 @@
                 renderExternalScheduleForSelectedDate();
                 await loadStaffRoster(false);
                 await loadCloudDataForSelectedDate();
+                syncSelectedScheduleToDispatch();
                 renderBoard();
                 lucide.createIcons();
             });
@@ -1144,6 +1221,7 @@
             url.searchParams.set('date', selectedDispatchDate());
             window.history.replaceState({}, '', url.toString());
             await loadCloudDataForSelectedDate();
+            syncSelectedScheduleToDispatch();
             renderBoard();
             lucide.createIcons();
         }
